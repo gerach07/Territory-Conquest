@@ -30,11 +30,22 @@ const { sanitizeInput } = require('./src/utils/sanitizers');
 // CONFIGURATION
 // ============================================================================
 
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:3001,http://localhost:5000')
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:3001,http://localhost:5000,https://absnakeab.web.app,https://absnakeab.firebaseapp.com')
   .split(',')
   .map(o => o.trim())
   .filter(Boolean);
 
+// Ensure production URL is always allowed if not in env
+if (!ALLOWED_ORIGINS.includes('https://absnakeab.web.app')) {
+  ALLOWED_ORIGINS.push('https://absnakeab.web.app');
+}
+
+/**
+ * CORS origin validator.
+ * Allows:
+ *  - any origin in the ALLOWED_ORIGINS list
+ *  - null / undefined origin (desktop app loaded via file://)
+ */
 function isOriginAllowed(origin, callback) {
   if (!origin || ALLOWED_ORIGINS.includes(origin)) {
     callback(null, true);
