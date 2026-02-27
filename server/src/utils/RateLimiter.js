@@ -8,12 +8,12 @@
 
 class RateLimiter {
   /**
-   * @param {number} windowMs - Time window in milliseconds
    * @param {number} maxRequests - Maximum allowed requests within the window
+   * @param {number} windowMs - Time window in milliseconds
    */
-  constructor(windowMs = 60000, maxRequests = 20) {
-    this.windowMs = windowMs;
+  constructor(maxRequests = 20, windowMs = 60000) {
     this.maxRequests = maxRequests;
+    this.windowMs = windowMs;
     this.tracker = new Map();
   }
 

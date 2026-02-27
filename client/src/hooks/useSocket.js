@@ -33,6 +33,7 @@ const useSocket = () => {
     }
 
     // --- Local-first, then public fallback ---
+    let fallbackTimer;
     let localConnected = false;
 
     const switchToPublic = () => {
@@ -60,11 +61,10 @@ const useSocket = () => {
       timeout: LOCAL_TIMEOUT_MS,
     });
 
-    let fallbackTimer;
-
     local.on('connect', () => {
+      if (cancelled) { local.disconnect(); return; }
+      clearTimeout(fallbackTimer);
       localConnected = true;
-      if (cancelled) return;
       setServerUrl(LOCAL_SERVER_URL);
       local.io.reconnection(true);
       local.io.reconnectionDelay(1000);

@@ -120,8 +120,8 @@ class Room {
     this.winnerName = null;
 
     // Per-player rate limiters
-    this.actionLimiter = new RateLimiter(1000, RATE_LIMIT_ACTIONS_PER_SECOND);
-    this.chatLimiter = new RateLimiter(1000, RATE_LIMIT_CHAT_PER_SECOND);
+    this.actionLimiter = new RateLimiter(RATE_LIMIT_ACTIONS_PER_SECOND, 1000);
+    this.chatLimiter = new RateLimiter(RATE_LIMIT_CHAT_PER_SECOND, 1000);
   }
 
   // ── State Machine ──

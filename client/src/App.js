@@ -690,7 +690,7 @@ function App() {
 
       {/* ── Footer ── */}
       <footer className="max-w-5xl mx-auto px-3 sm:px-6 py-2.5 text-center mt-auto relative z-10" role="contentinfo">
-        <p className="text-[0.55rem] text-slate-600">{t('app.footer')} · {t('app.version')}</p>
+        <p className="text-[0.55rem] text-slate-600">{t('app.footer')}</p>
       </footer>
     </div>
   );

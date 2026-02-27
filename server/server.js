@@ -79,7 +79,7 @@ const io = socketIo(server, {
 
 const rooms = {};
 const playerToRoom = {};
-const ipRateLimiter = new RateLimiter(60000, IP_RATE_LIMIT_MAX);
+const ipRateLimiter = new RateLimiter(IP_RATE_LIMIT_MAX, 60000);
 const pinTracker = new Map();
 const PIN_RATE_WINDOW = 60000;
 const PIN_RATE_MAX = 5;

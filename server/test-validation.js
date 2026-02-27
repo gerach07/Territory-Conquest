@@ -219,7 +219,7 @@ assert(sanitized.length <= 50, 'Max length enforced');
 
 suite('RATE LIMITER: Basic Functionality');
 
-const limiter = new RateLimiter(1000, 5); // window=1s, max=5
+const limiter = new RateLimiter(5, 1000); // max=5, window=1s
 
 // Should allow first 5
 let allowed = 0;

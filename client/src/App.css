@@ -199,8 +199,10 @@ input:focus, select:focus, textarea:focus {
   pointer-events: none;
 }
 
-.glass-card:hover::before {
-  left: 100%;
+@media (hover: hover) {
+  .glass-card:hover::before {
+    left: 100%;
+  }
 }
 
 /* Corner-bracket decoration — used on the room code card in the waiting room */
@@ -228,17 +230,19 @@ input:focus, select:focus, textarea:focus {
   right: 10px;
   border-width: 0 2.5px 2.5px 0;
 }
-.corner-brackets:hover::before,
-.corner-brackets:hover::after {
-  border-color: rgba(6, 182, 212, 0.9);
-}
-.corner-brackets:hover::before {
-  top: 8px;
-  left: 8px;
-}
-.corner-brackets:hover::after {
-  bottom: 8px;
-  right: 8px;
+@media (hover: hover) {
+  .corner-brackets:hover::before,
+  .corner-brackets:hover::after {
+    border-color: rgba(6, 182, 212, 0.9);
+  }
+  .corner-brackets:hover::before {
+    top: 8px;
+    left: 8px;
+  }
+  .corner-brackets:hover::after {
+    bottom: 8px;
+    right: 8px;
+  }
 }
 
 /* Scanline sweep — subtle animated line across WaitingRoom code card */
@@ -273,12 +277,14 @@ input:focus, select:focus, textarea:focus {
   transform: translateY(0);
   transition: all 0.3s ease;
 }
-.slot-ready:hover {
-  transform: translateY(-2px);
-  box-shadow: 
-    inset 0 0 16px rgba(52, 211, 153, 0.15), 
-    0 0 16px rgba(52, 211, 153, 0.2),
-    0 6px 20px rgba(52, 211, 153, 0.12);
+@media (hover: hover) {
+  .slot-ready:hover {
+    transform: translateY(-2px);
+    box-shadow: 
+      inset 0 0 16px rgba(52, 211, 153, 0.15), 
+      0 0 16px rgba(52, 211, 153, 0.2),
+      0 6px 20px rgba(52, 211, 153, 0.12);
+  }
 }
 /* Pulse animation for waiting slot */
 @keyframes pulseGlow {
