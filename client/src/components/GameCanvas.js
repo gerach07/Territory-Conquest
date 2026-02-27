@@ -105,7 +105,7 @@ const GameCanvas = memo(({
   timeRemaining, killFeed,
   lightTheme,
   prevPlayers, tickTime,
-  localPrediction, correction,
+  localSim,
 }) => {
   const { t }       = useI18n();
   const canvasRef    = useRef(null);
@@ -113,11 +113,6 @@ const GameCanvas = memo(({
   const gameStateRef = useRef(gameState);
   const myIdRef      = useRef(myId);
   const isSpectatorRef = useRef(isSpectator);
-  // NOTE: prevPlayers, tickTime, localPrediction, correction are React ref
-  // objects passed from App.js. We read .current directly in the render loop
-  // (ref objects have stable identity, so .current always gives latest value).
-  // Previous approach of copying into local refs via useEffect was broken
-  // because ref dependencies never change, so the effect only ran once.
 
   // Cache canvas 2D context
   const ctxRef = useRef(null);
@@ -376,7 +371,7 @@ const GameCanvas = memo(({
       const w = canvas.width;
       const h = canvas.height;
 
-      // Interpolation factor for OTHER players (local player uses prediction)
+      // Interpolation factor for OTHER players (local player uses local sim)
       const now = performance.now();
       const tickT = tickTime?.current || now;
       const elapsed = now - tickT;
@@ -385,39 +380,20 @@ const GameCanvas = memo(({
 
       const me = gs.players?.find(p => p.id === myIdRef.current);
 
-      // ── Always-on prediction for local player ──
-      // localPrediction.current is kept active during the entire game.
-      // It provides smooth 60fps movement independent of server tick rate.
-      const prediction = localPrediction?.current;
-      const corr = correction?.current;
+      // ── Local simulation rendering for own player ──
+      // The local sim ticks at 10Hz (same as server), so we interpolate
+      // between sim.prevX/Y and sim.x/y at 60fps for smooth movement.
+      const sim = localSim?.current;
       let meInterp;
-      if (me && prediction && me.alive) {
-        // Calculate predicted position from prediction origin
-        const predElapsed = now - prediction.startTime;
-        const cellsMoved = predElapsed / TICK_MS;
-        const dv = DIR_VECTORS[prediction.direction];
-        if (dv) {
-          let ix = prediction.startX + dv.dx * cellsMoved;
-          let iy = prediction.startY + dv.dy * cellsMoved;
-          // Apply & decay correction offset for smooth reconciliation
-          if (corr && (Math.abs(corr.x) > 0.01 || Math.abs(corr.y) > 0.01)) {
-            ix += corr.x;
-            iy += corr.y;
-            corr.x *= 0.88;
-            corr.y *= 0.88;
-          } else if (corr) {
-            corr.x = 0;
-            corr.y = 0;
-          }
-          meInterp = {
-            ix: Math.max(0, Math.min(GRID_SIZE - 1, ix)),
-            iy: Math.max(0, Math.min(GRID_SIZE - 1, iy)),
-          };
-        } else {
-          meInterp = { ix: me.x, iy: me.y };
-        }
+      if (me && sim && sim.active && sim.alive) {
+        const simElapsed = now - (sim.tickTime || now);
+        const t = Math.min(simElapsed / TICK_MS, 1.0); // clamp to [0,1] — no extrapolation past sim tick
+        meInterp = {
+          ix: sim.prevX + (sim.x - sim.prevX) * t,
+          iy: sim.prevY + (sim.y - sim.prevY) * t,
+        };
       } else if (me) {
-        // Fallback: normal interpolation (no prediction active, e.g. just spawned)
+        // Fallback: normal interpolation (spectator, dead, or sim not active)
         meInterp = getInterpPos(me, prev, t_lerp);
       } else {
         meInterp = null;

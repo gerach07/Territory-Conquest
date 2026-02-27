@@ -20,26 +20,11 @@ import GameOver         from './components/GameOver';
 import ChatBox          from './components/ChatBox';
 import ConnectionOverlay from './components/ConnectionOverlay';
 
-// Direction vectors for prediction calculations
+// Direction vectors for local simulation
 const DIR_V = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
-const MAX_LOCAL_EXTRAP_CELLS = 2.0;
-const MAX_CORRECTION_ABS = 1.25;
-const MAX_CORRECTION_DIST = 2.2;
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
-}
-
-// Calculate predicted position from a prediction state
-function getPredictedPos(pred, now) {
-  if (!pred) return null;
-  const elapsed = now - pred.startTime;
-  const cells = Math.min(elapsed / TICK_MS, MAX_LOCAL_EXTRAP_CELLS);
-  const dv = DIR_V[pred.direction] || [0, 0];
-  return {
-    x: clamp(pred.startX + dv[0] * cells, 0, GRID_SIZE - 1),
-    y: clamp(pred.startY + dv[1] * cells, 0, GRID_SIZE - 1),
-  };
 }
 
 /* ── Floating bubble background ───────────────────────────── */
@@ -157,11 +142,21 @@ function App() {
   const tickTimeRef    = useRef(0);      // when tick N arrived (performance.now())
   const lastServerSeqRef = useRef(0);
 
-  // Client-side prediction: smooth movement on high-latency connections
-  // When user changes direction, we predict locally and ignore server ticks
-  // until the server confirms the new direction.
-  const localPredictionRef = useRef(null); // { startX, startY, direction, startTime }
-  const correctionRef = useRef({ x: 0, y: 0 }); // smooth error correction offset
+  // ── Local simulation for own player ──
+  // Runs at the same 10Hz tick rate as the server, moving 1 cell per tick.
+  // This produces discrete positions that exactly match server movement,
+  // eliminating drift from continuous time-based extrapolation.
+  // GameCanvas interpolates between localSim.prevX/Y and localSim.x/y
+  // at 60fps for smooth visuals.
+  const localSimRef = useRef({
+    x: 0, y: 0,         // current sim position (integer cells)
+    prevX: 0, prevY: 0, // position at previous local tick
+    direction: 'right',  // current direction
+    pendingDir: null,    // direction change server hasn't confirmed yet
+    tickTime: 0,        // performance.now() of last local tick
+    alive: false,
+    active: false,
+  });
 
   // Keep refs in sync (consolidated into fewer effects)
   useEffect(() => { socketRef.current = socket; }, [socket]);
@@ -209,6 +204,46 @@ function App() {
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), duration);
   }, []);
+
+  /* ── Local simulation loop (10Hz, matching server tick rate) ── */
+  useEffect(() => {
+    const sim = localSimRef.current;
+    if (phase !== 'game' || isSpectator) {
+      sim.active = false;
+      return;
+    }
+    // Initialize sim from current gameState
+    const gs = gameStateRef.current;
+    const myId = socketRef.current?.id;
+    if (gs?.players && myId) {
+      const me = gs.players.find(p => p.id === myId);
+      if (me) {
+        sim.x = me.x; sim.y = me.y;
+        sim.prevX = me.x; sim.prevY = me.y;
+        sim.direction = me.direction || 'right';
+        sim.alive = me.alive;
+        sim.tickTime = performance.now();
+      }
+    }
+    sim.active = true;
+    sim.pendingDir = null;
+
+    const interval = setInterval(() => {
+      if (!sim.active || !sim.alive) return;
+      // Save previous position for interpolation
+      sim.prevX = sim.x;
+      sim.prevY = sim.y;
+      sim.tickTime = performance.now();
+      // Advance 1 cell in current direction (matches server exactly)
+      const dv = DIR_V[sim.direction];
+      if (dv) {
+        sim.x = clamp(sim.x + dv[0], 0, GRID_SIZE - 1);
+        sim.y = clamp(sim.y + dv[1], 0, GRID_SIZE - 1);
+      }
+    }, TICK_MS);
+
+    return () => clearInterval(interval);
+  }, [phase, isSpectator]);
 
   /* ── Server health polling (pauses when tab is hidden) ── */
   useEffect(() => {
@@ -366,11 +401,24 @@ function App() {
 
     const onGameStarted = (data) => {
       const gs = processGameState(data.gameState, data.grid, null);
-      gameStateRef.current = gs; // sync ref immediately (before React render)
+      gameStateRef.current = gs;
       setGameState(gs);
       lastServerSeqRef.current = 0;
-      localPredictionRef.current = null;
-      correctionRef.current = { x: 0, y: 0 };
+      // Initialize local sim from game start positions
+      const sim = localSimRef.current;
+      const myId = socketRef.current?.id;
+      if (gs?.players && myId) {
+        const me = gs.players.find(p => p.id === myId);
+        if (me) {
+          sim.x = me.x; sim.y = me.y;
+          sim.prevX = me.x; sim.prevY = me.y;
+          sim.direction = me.direction || 'right';
+          sim.alive = me.alive;
+          sim.tickTime = performance.now();
+          sim.pendingDir = null;
+          sim.active = true;
+        }
+      }
       setGameTimeLimit(data.timeLimit || 180);
       setPhase('game');
       setIsDead(false);
@@ -402,76 +450,54 @@ function App() {
 
       const gs = processGameState(state, null, prevGs?.grid);
 
-      // ── Always-on prediction for local player ──
-      // The local player is ALWAYS rendered via prediction (dead-reckoning).
-      // On each server tick we update the prediction origin to the server's
-      // authoritative position, with a small correction offset for visual
-      // continuity. If there's a pending direction change, we ignore stale
-      // ticks (where the server still shows the old direction).
-      if (gs.players && myId) {
+      // ── Reconcile local simulation with server authority ──
+      const sim = localSimRef.current;
+      if (gs.players && myId && sim.active) {
         const meIdx = gs.players.findIndex(p => p.id === myId);
         if (meIdx !== -1) {
           const serverMe = gs.players[meIdx];
-          const prediction = localPredictionRef.current;
 
-          if (prediction && prediction.pendingDir) {
-            // We have a pending direction change the server hasn't confirmed
-            if (serverMe.direction === prediction.direction) {
-              // Server confirmed our direction! Adopt server position.
-              const visualPos = getPredictedPos(prediction, now);
-              const rawX = (visualPos.x - serverMe.x);
-              const rawY = (visualPos.y - serverMe.y);
-              const dist = Math.hypot(rawX, rawY);
-              correctionRef.current = {
-                x: dist > MAX_CORRECTION_DIST ? 0 : clamp(rawX, -MAX_CORRECTION_ABS, MAX_CORRECTION_ABS),
-                y: dist > MAX_CORRECTION_DIST ? 0 : clamp(rawY, -MAX_CORRECTION_ABS, MAX_CORRECTION_ABS),
-              };
-              localPredictionRef.current = {
-                startX: serverMe.x,
-                startY: serverMe.y,
-                direction: serverMe.direction,
-                startTime: now,
-                pendingDir: false,
-              };
-            } else if (now - prediction.startTime < 800) {
-              // Stale tick — server hasn't processed our change yet.
-              // Keep predicting locally; don't update local player from server.
-            } else {
-              // Safety timeout (800ms) — accept server state to avoid desyncing
-              localPredictionRef.current = {
-                startX: serverMe.x,
-                startY: serverMe.y,
-                direction: serverMe.direction,
-                startTime: now,
-                pendingDir: false,
-              };
-              correctionRef.current = { x: 0, y: 0 };
-            }
-          } else if (serverMe.alive) {
-            // No pending direction change — seamlessly adopt server position.
-            // Calculate correction for visual continuity.
-            if (prediction) {
-              const visualPos = getPredictedPos(prediction, now);
-              const oldCorr = correctionRef.current;
-              const rawX = (visualPos.x + (oldCorr?.x || 0)) - serverMe.x;
-              const rawY = (visualPos.y + (oldCorr?.y || 0)) - serverMe.y;
-              const dist = Math.hypot(rawX, rawY);
-              correctionRef.current = {
-                x: dist > MAX_CORRECTION_DIST ? 0 : clamp(rawX, -MAX_CORRECTION_ABS, MAX_CORRECTION_ABS),
-                y: dist > MAX_CORRECTION_DIST ? 0 : clamp(rawY, -MAX_CORRECTION_ABS, MAX_CORRECTION_ABS),
-              };
-            }
-            localPredictionRef.current = {
-              startX: serverMe.x,
-              startY: serverMe.y,
-              direction: serverMe.direction,
-              startTime: now,
-              pendingDir: false,
-            };
+          if (!serverMe.alive) {
+            // Server says we're dead
+            sim.alive = false;
           } else {
-            // Player is dead — clear prediction
-            localPredictionRef.current = null;
-            correctionRef.current = { x: 0, y: 0 };
+            sim.alive = true;
+            const dist = Math.abs(serverMe.x - sim.x) + Math.abs(serverMe.y - sim.y);
+
+            if (sim.pendingDir) {
+              // We have a pending direction change
+              if (serverMe.direction === sim.pendingDir) {
+                // Server confirmed! Clear pending flag.
+                sim.pendingDir = null;
+                // If within 2 cells, nudge toward server. Otherwise snap.
+                if (dist <= 2) {
+                  // Blend: move halfway toward server position
+                  sim.x = Math.round(sim.x + (serverMe.x - sim.x) * 0.5);
+                  sim.y = Math.round(sim.y + (serverMe.y - sim.y) * 0.5);
+                } else {
+                  sim.x = serverMe.x; sim.y = serverMe.y;
+                  sim.prevX = serverMe.x; sim.prevY = serverMe.y;
+                }
+              }
+              // else: stale tick, server still shows old direction — ignore position
+            } else {
+              // No pending change — adopt server direction always
+              sim.direction = serverMe.direction;
+              if (dist > 3) {
+                // Large discrepancy (respawn/teleport) — snap immediately
+                sim.x = serverMe.x; sim.y = serverMe.y;
+                sim.prevX = serverMe.x; sim.prevY = serverMe.y;
+              } else if (dist > 0) {
+                // Small drift — blend toward server (1 cell per tick max)
+                const dx = serverMe.x - sim.x;
+                const dy = serverMe.y - sim.y;
+                if (Math.abs(dx) > Math.abs(dy)) {
+                  sim.x += Math.sign(dx);
+                } else if (dy !== 0) {
+                  sim.y += Math.sign(dy);
+                }
+              }
+            }
           }
         }
       }
@@ -499,8 +525,7 @@ function App() {
             if (evt.victim === socket.id) {
               setIsDead(true);
               setDeathTime(Date.now());
-              localPredictionRef.current = null;
-              correctionRef.current = { x: 0, y: 0 };
+              localSimRef.current.alive = false;
               playSound('death');
             } else {
               playSound('kill');
@@ -509,8 +534,7 @@ function App() {
           if (evt.type === 'respawn' && evt.playerId === socket.id) {
             setIsDead(false);
             setDeathTime(null);
-            localPredictionRef.current = null;
-            correctionRef.current = { x: 0, y: 0 };
+            // Sim will be re-initialized by next server tick (alive=true path)
           }
           if (evt.type === 'forfeit' || evt.type === 'leave') {
             const fName = evt.playerName || 'Player';
@@ -524,8 +548,7 @@ function App() {
     };
 
     const onGameOver = (data) => {
-      localPredictionRef.current = null;
-      correctionRef.current = { x: 0, y: 0 };
+      localSimRef.current.active = false;
       setGameOverData(data);
       setPhase('gameOver');
       setPlayAgainPending(false);
@@ -557,8 +580,8 @@ function App() {
       gameStateRef.current = null;
       setGameState(null);
       lastServerSeqRef.current = 0;
-      localPredictionRef.current = null;
-      correctionRef.current = { x: 0, y: 0 };
+      localSimRef.current.active = false;
+      localSimRef.current.pendingDir = null;
       setGameOverData(null);
       setIsDead(false);
       setKillFeed([]);
@@ -820,37 +843,10 @@ function App() {
     gameStateRef.current = newGs;
     setGameState(newGs);
 
-    // Calculate prediction start from CURRENT visual position
-    // (not stale server position) — this is critical for chained
-    // direction changes (e.g., UP then quickly RIGHT)
-    const now = performance.now();
-    const prediction = localPredictionRef.current;
-    let startX, startY;
-    if (prediction) {
-      // Use where we're visually right now
-      const pos = getPredictedPos(prediction, now);
-      const corr = correctionRef.current;
-      // Round to nearest integer — server works in discrete cells
-      startX = Math.round(pos.x + (corr?.x || 0));
-      startY = Math.round(pos.y + (corr?.y || 0));
-      startX = Math.max(0, Math.min(GRID_SIZE - 1, startX));
-      startY = Math.max(0, Math.min(GRID_SIZE - 1, startY));
-    } else {
-      startX = me.x;
-      startY = me.y;
-    }
-
-    // Clear correction — we're committing to a new prediction origin
-    correctionRef.current = { x: 0, y: 0 };
-
-    // Start new prediction from visual position in the new direction
-    localPredictionRef.current = {
-      startX,
-      startY,
-      direction: dir,
-      startTime: now,
-      pendingDir: true, // waiting for server to confirm this direction
-    };
+    // Update local simulation immediately
+    const sim = localSimRef.current;
+    sim.direction = dir;
+    sim.pendingDir = dir; // mark as pending until server confirms
   }, []);
 
   const handleLeaveGame = useCallback(() => {
@@ -1077,8 +1073,7 @@ function App() {
             lightTheme={lightTheme}
             prevPlayers={prevPlayersRef}
             tickTime={tickTimeRef}
-            localPrediction={localPredictionRef}
-            correction={correctionRef}
+            localSim={localSimRef}
           />
         )}
 
