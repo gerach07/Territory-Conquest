@@ -18,27 +18,45 @@ const RateLimiter = require('../utils/RateLimiter');
 // CAPTURE ALGORITHM (Flood Fill)
 // ============================================================================
 
-function captureTerritory(grid, playerId, trail, cellCounts) {
+function captureTerritory(grid, playerId, trail, cellCounts, ownedCells) {
   if (!trail || trail.length === 0) return [];
 
   // Mark trail cells as player territory, tracking prev owners for cellCounts
   for (const pos of trail) {
     const prev = grid[pos.y][pos.x];
-    if (prev !== 0 && prev !== playerId && cellCounts && cellCounts[prev] !== undefined) cellCounts[prev]--;
+    if (prev !== 0 && prev !== playerId) {
+      if (cellCounts && cellCounts[prev] !== undefined) cellCounts[prev]--;
+      // Remove from previous owner's cell set
+      if (ownedCells && ownedCells[prev]) ownedCells[prev].delete(pos.y * GRID_SIZE + pos.x);
+    }
     grid[pos.y][pos.x] = playerId;
+    // Track in owned cells set
+    if (ownedCells && ownedCells[playerId]) ownedCells[playerId].add(pos.y * GRID_SIZE + pos.x);
   }
   if (cellCounts) {
     cellCounts[playerId] = (cellCounts[playerId] || 0) + trail.length;
   }
 
+  // Compute bounding box from owned cells set (O(owned) instead of O(GRID_SIZE^2))
   let minX = GRID_SIZE, maxX = 0, minY = GRID_SIZE, maxY = 0;
-  for (let y = 0; y < GRID_SIZE; y++) {
-    for (let x = 0; x < GRID_SIZE; x++) {
-      if (grid[y][x] === playerId) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
+  if (ownedCells && ownedCells[playerId]) {
+    for (const key of ownedCells[playerId]) {
+      const y = (key / GRID_SIZE) | 0;
+      const x = key % GRID_SIZE;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  } else {
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        if (grid[y][x] === playerId) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
       }
     }
   }
@@ -86,7 +104,9 @@ function captureTerritory(grid, playerId, trail, cellCounts) {
         if (grid[gy][gx] !== playerId) {
           const prev = grid[gy][gx];
           if (prev !== 0 && cellCounts && cellCounts[prev] !== undefined) cellCounts[prev]--;
+          if (prev !== 0 && ownedCells && ownedCells[prev]) ownedCells[prev].delete(gy * GRID_SIZE + gx);
           grid[gy][gx] = playerId;
+          if (ownedCells && ownedCells[playerId]) ownedCells[playerId].add(gy * GRID_SIZE + gx);
           captured.push({ x: gx, y: gy });
         }
       }
@@ -226,8 +246,8 @@ class Room {
       isSpectator,
     };
     this.chatHistory.push(msg);
-    // Keep max messages with efficient truncation (O(1) instead of O(n))
-    if (this.chatHistory.length > MAX_CHAT_HISTORY) {
+    // Truncate when exceeding limit (slice is O(n), but only triggers occasionally)
+    if (this.chatHistory.length > MAX_CHAT_HISTORY * 1.5) {
       this.chatHistory = this.chatHistory.slice(-MAX_CHAT_HISTORY);
     }
     return msg;
@@ -243,6 +263,8 @@ class Room {
 
     // Per-player cell count for O(1) score updates
     this.cellCounts = {};
+    // Per-player owned cell coordinates for O(owned) territory clearing
+    this.ownedCells = {};
 
     this.playerOrder = Object.keys(this.players);
     this.playerOrder.forEach((pid, idx) => {
@@ -255,6 +277,7 @@ class Room {
       p.forfeited = false;
 
       this.cellCounts[p.playerIndex] = 0;
+      this.ownedCells[p.playerIndex] = new Set();
 
       const half = Math.floor(START_TERRITORY_SIZE / 2);
       for (let dy = -half; dy <= half; dy++) {
@@ -263,6 +286,7 @@ class Room {
           if (gx >= 0 && gx < GRID_SIZE && gy >= 0 && gy < GRID_SIZE) {
             this.grid[gy][gx] = p.playerIndex;
             this.cellCounts[p.playerIndex]++;
+            this.ownedCells[p.playerIndex].add(gy * GRID_SIZE + gx);
           }
         }
       }
@@ -458,11 +482,11 @@ class Room {
       if (trailOwnerIdx !== 0) {
         const trailOwnerId = this.playerOrder.find(id => this.players[id] && this.players[id].playerIndex === trailOwnerIdx);
         if (trailOwnerIdx === p.playerIndex) {
-          // Crossing own trail — detect loop and auto-capture enclosed area
+          // Crossing own trail — detect loop via trailGrid (O(1) instead of O(trail_length))
           const loopStart = p.trail.findIndex(pt => pt.x === newX && pt.y === newY);
           if (loopStart >= 0) {
             const loop = p.trail.slice(loopStart);
-            const captured = captureTerritory(this.grid, p.playerIndex, loop, this.cellCounts);
+            const captured = captureTerritory(this.grid, p.playerIndex, loop, this.cellCounts, this.ownedCells);
             for (const pos of loop) { this.trailGrid[pos.y][pos.x] = 0; }
             for (const pos of loop) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'trail_to_territory' }); }
             for (const pos of captured) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'captured' }); }
@@ -497,7 +521,7 @@ class Room {
       const cellOwner = this.grid[newY][newX];
 
       if (cellOwner === p.playerIndex && p.trail.length > 0) {
-        const captured = captureTerritory(this.grid, p.playerIndex, p.trail, this.cellCounts);
+        const captured = captureTerritory(this.grid, p.playerIndex, p.trail, this.cellCounts, this.ownedCells);
         for (const pos of p.trail) { this.trailGrid[pos.y][pos.x] = 0; }
         for (const pos of p.trail) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'trail_to_territory' }); }
         for (const pos of captured) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'captured' }); }
@@ -523,12 +547,22 @@ class Room {
       gridChanges.push({ x: pos.x, y: pos.y, owner: 0, type: 'trail_removed' });
     }
     p.trail = [];
-    // Clear territory — decrement cell count
-    for (let y = 0; y < GRID_SIZE; y++) {
-      for (let x = 0; x < GRID_SIZE; x++) {
-        if (this.grid[y][x] === p.playerIndex) {
-          this.grid[y][x] = 0;
-          gridChanges.push({ x, y, owner: 0, type: 'territory_wiped' });
+    // Clear territory — use per-player owned cell set for O(owned) instead of O(GRID_SIZE^2)
+    if (this.ownedCells && this.ownedCells[p.playerIndex]) {
+      for (const key of this.ownedCells[p.playerIndex]) {
+        const y = (key / GRID_SIZE) | 0;
+        const x = key % GRID_SIZE;
+        this.grid[y][x] = 0;
+        gridChanges.push({ x, y, owner: 0, type: 'territory_wiped' });
+      }
+      this.ownedCells[p.playerIndex].clear();
+    } else {
+      for (let y = 0; y < GRID_SIZE; y++) {
+        for (let x = 0; x < GRID_SIZE; x++) {
+          if (this.grid[y][x] === p.playerIndex) {
+            this.grid[y][x] = 0;
+            gridChanges.push({ x, y, owner: 0, type: 'territory_wiped' });
+          }
         }
       }
     }
@@ -574,13 +608,18 @@ class Room {
         const gx = p.x + dx, gy = p.y + dy;
         if (gx >= 0 && gx < GRID_SIZE && gy >= 0 && gy < GRID_SIZE) {
           const prev = this.grid[gy][gx];
-          if (prev !== 0 && prev !== p.playerIndex && this.cellCounts && this.cellCounts[prev] !== undefined) {
-            this.cellCounts[prev]--;
+          if (prev !== 0 && prev !== p.playerIndex) {
+            if (this.cellCounts && this.cellCounts[prev] !== undefined) this.cellCounts[prev]--;
+            if (this.ownedCells && this.ownedCells[prev]) this.ownedCells[prev].delete(gy * GRID_SIZE + gx);
           }
           this.grid[gy][gx] = p.playerIndex;
           if (this.cellCounts) {
             if (this.cellCounts[p.playerIndex] === undefined) this.cellCounts[p.playerIndex] = 0;
             if (prev !== p.playerIndex) this.cellCounts[p.playerIndex]++;
+          }
+          if (this.ownedCells) {
+            if (!this.ownedCells[p.playerIndex]) this.ownedCells[p.playerIndex] = new Set();
+            this.ownedCells[p.playerIndex].add(gy * GRID_SIZE + gx);
           }
           gridChanges.push({ x: gx, y: gy, owner: p.playerIndex, type: 'respawn_territory' });
         }
@@ -604,9 +643,19 @@ class Room {
     for (const pid of this.playerOrder) {
       const p = this.players[pid];
       if (!p) continue;
+      // Build trail as flat array to avoid per-tick object allocation
+      let trailArr;
+      if (p.trail.length > 0) {
+        trailArr = new Array(p.trail.length);
+        for (let i = 0; i < p.trail.length; i++) {
+          trailArr[i] = [p.trail[i].x, p.trail[i].y];
+        }
+      } else {
+        trailArr = [];
+      }
       players[pid] = {
         x: p.x, y: p.y, d: p.direction,
-        t: p.trail.length > 0 ? p.trail.map(pt => [pt.x, pt.y]) : [],
+        t: trailArr,
         a: p.alive ? 1 : 0,
         s: p.score, k: p.kills,
         // Static fields needed for first render / reconnection

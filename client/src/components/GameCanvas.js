@@ -10,16 +10,29 @@ import { useI18n } from '../i18n/I18nContext';
 const RESPAWN_SECONDS = 3;
 
 // Spectator camera limits
-const SPEC_ZOOM_MIN = 30 / (GRID_SIZE + 4); // fit whole grid
-const SPEC_ZOOM_MAX = 2;
+const SPEC_ZOOM_MIN = 30 / (GRID_SIZE + 100); // allow seeing full grid square
+const SPEC_ZOOM_MAX = 1.5;
 const clampSpecCam = (cam) => {
   cam.zoom = Math.max(SPEC_ZOOM_MIN, Math.min(SPEC_ZOOM_MAX, cam.zoom));
   cam.x   = Math.max(0, Math.min(GRID_SIZE, cam.x));
   cam.y   = Math.max(0, Math.min(GRID_SIZE, cam.y));
 };
 
-/* ── Death overlay with countdown ── */
-function DeathOverlay({ deathTime, t }) {
+// Pre-computed color strings to avoid per-frame string concatenation
+const PLAYER_COLORS_ALPHA40 = PLAYER_COLORS.map(c => c + '40');
+const PLAYER_COLORS_ALPHA80 = PLAYER_COLORS.map(c => c + '80');
+
+// Stable interpolation helper (module-level to avoid per-frame closure allocation)
+function getInterpPos(p, prev, t_lerp) {
+  const pp = prev[p.id];
+  if (!pp || !p.alive) return { ix: p.x, iy: p.y };
+  const dx = Math.abs(p.x - pp.x), dy = Math.abs(p.y - pp.y);
+  if (dx > 1 || dy > 1) return { ix: p.x, iy: p.y };
+  return { ix: pp.x + (p.x - pp.x) * t_lerp, iy: pp.y + (p.y - pp.y) * t_lerp };
+}
+
+/* ── Death overlay with countdown (memoized) ── */
+const DeathOverlay = memo(function DeathOverlay({ deathTime, t }) {
   const [countdown, setCountdown] = useState(RESPAWN_SECONDS);
   useEffect(() => {
     if (!deathTime) return;
@@ -41,7 +54,7 @@ function DeathOverlay({ deathTime, t }) {
       </div>
     </div>
   );
-}
+});
 
 const GameCanvas = memo(({
   gameState, myId, isSpectator, isDead, deathTime,
@@ -62,6 +75,18 @@ const GameCanvas = memo(({
   // Cache canvas 2D context
   const ctxRef = useRef(null);
 
+  // Offscreen canvas for territory grid (updated only on grid changes)
+  const gridCanvasRef = useRef(null);
+  const gridCtxRef = useRef(null);
+  const gridDirtyRef = useRef(true); // flag: needs full redraw
+
+  // Offscreen canvas for minimap (updated only on grid changes)
+  const mmCanvasRef = useRef(null);
+  const mmCtxRef = useRef(null);
+
+  // Last font size to avoid redundant ctx.font changes
+  const lastFontSizeRef = useRef(0);
+
   // Spectator camera state
   const [followPlayer, setFollowPlayer] = useState(null); // null = overview, playerId = follow
   const specCamRef = useRef({ x: GRID_SIZE / 2, y: GRID_SIZE / 2, zoom: 1 }); // free camera
@@ -69,8 +94,12 @@ const GameCanvas = memo(({
   const dragStartRef = useRef({ x: 0, y: 0, camX: 0, camY: 0 });
   const followPlayerRef = useRef(null);
 
-  // Keep refs current
-  useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
+  // Keep refs current (combined into fewer effects)
+  useEffect(() => {
+    gameStateRef.current = gameState;
+    // Mark grid dirty when gameState changes with grid changes
+    gridDirtyRef.current = true;
+  }, [gameState]);
   useEffect(() => { myIdRef.current = myId; }, [myId]);
   useEffect(() => { prevPlayersRef.current = prevPlayers?.current; tickTimeRef.current = tickTime?.current; }, [prevPlayers, tickTime]);
   useEffect(() => { followPlayerRef.current = followPlayer; }, [followPlayer]);
@@ -279,6 +308,21 @@ const GameCanvas = memo(({
     if (!ctxRef.current) ctxRef.current = canvas.getContext('2d');
     const ctx = ctxRef.current;
 
+    // Initialize offscreen canvases for territory grid caching
+    if (!gridCanvasRef.current) {
+      gridCanvasRef.current = document.createElement('canvas');
+      gridCanvasRef.current.width = GRID_SIZE;
+      gridCanvasRef.current.height = GRID_SIZE;
+      gridCtxRef.current = gridCanvasRef.current.getContext('2d');
+    }
+    // Initialize offscreen canvas for minimap caching
+    if (!mmCanvasRef.current) {
+      mmCanvasRef.current = document.createElement('canvas');
+      mmCanvasRef.current.width = GRID_SIZE;
+      mmCanvasRef.current.height = GRID_SIZE;
+      mmCtxRef.current = mmCanvasRef.current.getContext('2d');
+    }
+
     const render = () => {
       const gs = gameStateRef.current;
       if (!gs) { animFrameRef.current = requestAnimationFrame(render); return; }
@@ -292,21 +336,8 @@ const GameCanvas = memo(({
       const t_lerp = Math.min(elapsed / TICK_MS, 1);
       const prev = prevPlayersRef.current || {};
 
-      // Helper: get interpolated position for a player
-      const getInterp = (p) => {
-        const pp = prev[p.id];
-        if (!pp || !p.alive) return { ix: p.x, iy: p.y };
-        // Only interpolate if moved by 1 cell (normal movement), not teleported
-        const dx = Math.abs(p.x - pp.x), dy = Math.abs(p.y - pp.y);
-        if (dx > 1 || dy > 1) return { ix: p.x, iy: p.y };
-        return {
-          ix: pp.x + (p.x - pp.x) * t_lerp,
-          iy: pp.y + (p.y - pp.y) * t_lerp,
-        };
-      };
-
       const me = gs.players?.find(p => p.id === myIdRef.current);
-      const meInterp = me ? getInterp(me) : null;
+      const meInterp = me ? getInterpPos(me, prev, t_lerp) : null;
 
       // Camera: spectator uses free cam or follows a player
       let camX, camY, viewCells, cellSize;
@@ -320,7 +351,7 @@ const GameCanvas = memo(({
         if (followId) {
           const followed = gs.players?.find(p => p.id === followId);
           if (followed && followed.alive) {
-            const fi = getInterp(followed);
+            const fi = getInterpPos(followed, prev, t_lerp);
             camX = fi.ix;
             camY = fi.iy;
           } else {
@@ -365,30 +396,57 @@ const GameCanvas = memo(({
       ctx.lineWidth = 2;
       ctx.strokeRect(ox, oy, GRID_SIZE * cellSize, GRID_SIZE * cellSize);
 
-      // Territory
-      if (gs.grid) {
+      // Territory — rendered via offscreen canvas cache
+      if (gs.grid && gridDirtyRef.current) {
+        const gridCtx = gridCtxRef.current;
         const colorMap = gs.playerColorMap || {};
-        for (let y = startRow; y < Math.min(gs.grid.length, endRow); y++) {
+        gridCtx.clearRect(0, 0, GRID_SIZE, GRID_SIZE);
+        for (let y = 0; y < gs.grid.length; y++) {
           const row = gs.grid[y];
           if (!row) continue;
-          for (let x = startCol; x < Math.min(row.length, endCol); x++) {
+          for (let x = 0; x < row.length; x++) {
             const owner = row[x];
             if (owner > 0) {
               const cIdx = colorMap[owner];
               if (cIdx !== undefined && cIdx < PLAYER_COLORS.length) {
-                ctx.fillStyle = PLAYER_COLORS[cIdx] + '40';
-                ctx.fillRect(x * cellSize + ox, y * cellSize + oy, cellSize + 0.5, cellSize + 0.5);
+                gridCtx.fillStyle = PLAYER_COLORS_ALPHA40[cIdx];
+                gridCtx.fillRect(x, y, 1, 1);
               }
             }
           }
         }
+        // Also update minimap offscreen canvas
+        const mmCtx = mmCtxRef.current;
+        mmCtx.clearRect(0, 0, GRID_SIZE, GRID_SIZE);
+        for (let y = 0; y < gs.grid.length; y += 2) {
+          const row = gs.grid[y];
+          if (!row) continue;
+          for (let x = 0; x < row.length; x += 2) {
+            const owner = row[x];
+            if (owner > 0) {
+              const cIdx = colorMap[owner];
+              if (cIdx !== undefined && cIdx < PLAYER_COLORS.length) {
+                mmCtx.fillStyle = PLAYER_COLORS_ALPHA80[cIdx];
+                mmCtx.fillRect(x, y, 2, 2);
+              }
+            }
+          }
+        }
+        gridDirtyRef.current = false;
+      }
+
+      // Blit territory offscreen canvas to main canvas
+      if (gs.grid) {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(gridCanvasRef.current, ox, oy, GRID_SIZE * cellSize, GRID_SIZE * cellSize);
+        ctx.imageSmoothingEnabled = true;
       }
 
       // Trails
       if (gs.players) {
         gs.players.forEach(p => {
           if (p.trail?.length > 0) {
-            ctx.fillStyle = (PLAYER_COLORS[p.colorIndex] || '#ffffff') + '80';
+            ctx.fillStyle = PLAYER_COLORS_ALPHA80[p.colorIndex] || 'rgba(255,255,255,0.5)';
             p.trail.forEach(([tx, ty]) => {
               ctx.fillRect(tx * cellSize + ox + 1, ty * cellSize + oy + 1, cellSize - 2, cellSize - 2);
             });
@@ -398,31 +456,37 @@ const GameCanvas = memo(({
 
       // Players (interpolated)
       if (gs.players) {
+        const myCurrentId = myIdRef.current;
         gs.players.forEach(p => {
           if (!p.alive) return;
           const color = PLAYER_COLORS[p.colorIndex] || '#ffffff';
-          const { ix, iy } = getInterp(p);
+          const { ix, iy } = getInterpPos(p, prev, t_lerp);
           const px = ix * cellSize + ox;
           const py = iy * cellSize + oy;
           const s = cellSize;
+          const isSelf = p.id === myCurrentId;
 
-          if (p.id === myIdRef.current) { ctx.shadowColor = color; ctx.shadowBlur = 12; }
+          if (isSelf) { ctx.shadowColor = color; ctx.shadowBlur = 12; }
           ctx.fillStyle = color;
           ctx.fillRect(px + 1, py + 1, s - 2, s - 2);
           ctx.fillStyle = 'rgba(255,255,255,0.25)';
           ctx.fillRect(px + s * 0.2, py + s * 0.2, s * 0.3, s * 0.3);
-          ctx.shadowBlur = 0;
+          if (isSelf) ctx.shadowBlur = 0;
 
-          // Name tag
+          // Name tag (only change font when size changes)
+          const fontSize = Math.max(10, cellSize * 0.35);
+          if (fontSize !== lastFontSizeRef.current) {
+            ctx.font = `bold ${fontSize}px 'Rajdhani', sans-serif`;
+            lastFontSizeRef.current = fontSize;
+          }
           ctx.fillStyle = 'white';
-          ctx.font = `bold ${Math.max(10, cellSize * 0.35)}px 'Rajdhani', sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'bottom';
           ctx.fillText(p.name, px + s / 2, py - 4);
         });
       }
 
-      // Minimap
+      // Minimap — blit from cached offscreen canvas
       const mmSize = 100, margin = 12;
       const mx = margin, my = h - mmSize - margin - 40;
       ctx.fillStyle = 'rgba(15,23,42,0.8)';
@@ -432,30 +496,18 @@ const GameCanvas = memo(({
       ctx.strokeRect(mx, my, mmSize, mmSize);
       const scale = mmSize / GRID_SIZE;
 
-      // Draw minimap territory directly (no caching - simpler and works)
+      // Blit minimap territory from cached offscreen canvas
       if (gs.grid) {
-        const colorMap = gs.playerColorMap || {};
-        for (let y = 0; y < gs.grid.length; y += 2) {
-          const row = gs.grid[y];
-          if (!row) continue;
-          for (let x = 0; x < row.length; x += 2) {
-            const owner = row[x];
-            if (owner > 0) {
-              const cIdx = colorMap[owner];
-              if (cIdx !== undefined && cIdx < PLAYER_COLORS.length) {
-                ctx.fillStyle = PLAYER_COLORS[cIdx] + '80';
-                ctx.fillRect(mx + x * scale, my + y * scale, Math.max(2, scale * 2), Math.max(2, scale * 2));
-              }
-            }
-          }
-        }
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(mmCanvasRef.current, mx, my, mmSize, mmSize);
+        ctx.imageSmoothingEnabled = true;
       }
 
       // Draw player positions on top
       if (gs.players) {
         gs.players.forEach(p => {
           if (!p.alive) return;
-          const { ix, iy } = getInterp(p);
+          const { ix, iy } = getInterpPos(p, prev, t_lerp);
           ctx.fillStyle = p.id === myIdRef.current ? '#ffffff' : (PLAYER_COLORS[p.colorIndex] || '#ffffff');
           ctx.beginPath();
           ctx.arc(mx + ix * scale, my + iy * scale, p.id === myIdRef.current ? 3 : 2, 0, Math.PI * 2);
@@ -470,12 +522,21 @@ const GameCanvas = memo(({
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
   }, [lightTheme]);
 
-  /* ── Leaderboard data (memoized to avoid re-sorting every frame) ── */
+  /* ── Leaderboard data (memoized with stable key to avoid re-sorting every frame) ── */
+  const playersKey = useMemo(() => {
+    if (!gameState?.players) return '';
+    return gameState.players
+      .filter(p => !p.spectator)
+      .map(p => `${p.id}:${p.score || 0}`)
+      .join(',');
+  }, [gameState?.players]);
+
   const sorted = useMemo(() => 
     (gameState?.players || [])
       .filter(p => !p.spectator)
       .sort((a, b) => (b.score || 0) - (a.score || 0)),
-    [gameState?.players]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [playersKey]
   );
 
   return (

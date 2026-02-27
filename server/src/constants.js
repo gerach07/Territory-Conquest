@@ -1,6 +1,9 @@
 /**
  * ============================================================================
  * TERRITORY CONQUEST - Server Constants
+ * IMPORTANT: GRID_SIZE, TICK_RATE, and PLAYER_COLORS hex values
+ * must match client/src/constants.js. If you change them here,
+ * update the client file too (or vice versa) to prevent drift.
  * ============================================================================
  */
 

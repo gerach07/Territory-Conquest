@@ -55,46 +55,7 @@ input:focus, select:focus, textarea:focus {
   }
 }
 
-/* ===== LIGHT THEME OVERRIDES ===== */
-[data-theme="light"] {
-  --bg-from: #e0e7ff;
-  --bg-via: #dbeafe;
-  --bg-to: #e0e7ff;
-}
-
-[data-theme="light"] .theme-bg {
-  background: linear-gradient(135deg, #dbeafe 0%, #e0e7ff 50%, #ede9fe 100%) !important;
-  color: #1e293b;
-}
-
-[data-theme="light"] .theme-bg::before {
-  background-image:
-    linear-gradient(rgba(6, 182, 212, 0.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(6, 182, 212, 0.06) 1px, transparent 1px);
-}
-
-[data-theme="light"] .theme-header {
-  background: rgba(15, 23, 42, 0.9) !important;
-  backdrop-filter: blur(20px) !important;
-}
-
-[data-theme="light"] .theme-card {
-  background-color: rgba(255, 255, 255, 0.9) !important;
-  border-color: #cbd5e1 !important;
-  color: #1e293b;
-  box-shadow: 0 4px 16px rgba(6, 182, 212, 0.08);
-}
-
-[data-theme="light"] .theme-card .text-slate-400 { color: #64748b !important; }
-[data-theme="light"] .theme-card .text-white     { color: #1e293b !important; }
-[data-theme="light"] .theme-input {
-  background-color: #f1f5f9 !important;
-  border-color: #cbd5e1 !important;
-  color: #1e293b !important;
-}
-[data-theme="light"] .theme-msg { color: #334155; }
-
-/* Fallback light-theme class (used by TC toggle) */
+/* ===== LIGHT THEME OVERRIDES (via .light-theme class) ===== */
 .light-theme .theme-bg {
   background: linear-gradient(135deg, #dbeafe 0%, #e0e7ff 50%, #ede9fe 100%) !important;
   color: #1e293b;
@@ -139,23 +100,6 @@ input:focus, select:focus, textarea:focus {
 @keyframes floatSlow {
   0%, 100% { transform: translateY(0px); }
   50% { transform: translateY(-12px); }
-}
-
-/* Legacy bubble animation for floating bubbles component */
-@keyframes bubbleRise {
-  0%   { transform: translateY(0) scale(1);   opacity: 0; }
-  5%   { opacity: 1; }
-  90%  { opacity: 0.6; }
-  100% { transform: translateY(-100vh) scale(0.3); opacity: 0; }
-}
-
-.bubble {
-  position: absolute;
-  border-radius: 50%;
-  background: radial-gradient(circle at 30% 30%, rgba(56,189,248,0.12), rgba(59,130,246,0.05));
-  border: 1px solid rgba(56,189,248,0.08);
-  animation: bubbleRise linear infinite;
-  pointer-events: none;
 }
 
 .animate-fade-in       { animation: fadeSlideIn 0.3s ease-out; }

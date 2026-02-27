@@ -70,6 +70,7 @@ export function setURLRoom(roomCode, password = null) {
  * Process gameState from server format to client format.
  * Server sends players as object { [socketId]: {...} }; we need an array.
  * Server sends grid as flat array; we need 2D.
+ * Optimized to reduce GC pressure.
  */
 export function processGameState(state, flatGrid, prevGrid) {
   const result = { players: [], grid: prevGrid || null };
@@ -79,23 +80,30 @@ export function processGameState(state, flatGrid, prevGrid) {
     if (Array.isArray(state.players)) {
       result.players = state.players;
     } else {
-      result.players = Object.entries(state.players).map(([id, p]) => ({
-        id,
-        name:        p.name,
-        x:           p.x,
-        y:           p.y,
-        direction:   p.d || p.direction,
-        trail:       p.t ? p.t.map(pt => Array.isArray(pt) ? pt : [pt.x, pt.y])
-                         : (p.trail ? p.trail.map(pt => [pt.x, pt.y]) : []),
-        alive:       p.a !== undefined ? !!p.a : p.alive,
-        color:       p.color,
-        colorIndex:  p.colorIndex,
-        score:       p.s !== undefined ? p.s : p.score,
-        kills:       p.k !== undefined ? p.k : p.kills,
-        playerIndex: p.playerIndex,
-        spectator:   false,
-        forfeited:   p.forfeited || false,
-      }));
+      const entries = Object.keys(state.players);
+      const players = new Array(entries.length);
+      for (let i = 0; i < entries.length; i++) {
+        const id = entries[i];
+        const p = state.players[id];
+        const trail = p.t ? p.t : (p.trail ? p.trail.map(pt => [pt.x, pt.y]) : []);
+        players[i] = {
+          id,
+          name:        p.name,
+          x:           p.x,
+          y:           p.y,
+          direction:   p.d || p.direction,
+          trail,
+          alive:       p.a !== undefined ? !!p.a : p.alive,
+          color:       p.color,
+          colorIndex:  p.colorIndex,
+          score:       p.s !== undefined ? p.s : p.score,
+          kills:       p.k !== undefined ? p.k : p.kills,
+          playerIndex: p.playerIndex,
+          spectator:   false,
+          forfeited:   p.forfeited || false,
+        };
+      }
+      result.players = players;
     }
   }
 
@@ -113,7 +121,8 @@ export function processGameState(state, flatGrid, prevGrid) {
   // Apply incremental grid changes (clone affected rows for React immutability)
   if (state.gridChanges && result.grid) {
     const clonedRows = new Set();
-    state.gridChanges.forEach((change) => {
+    for (let i = 0; i < state.gridChanges.length; i++) {
+      const change = state.gridChanges[i];
       if (change.y >= 0 && change.y < GRID_SIZE && change.x >= 0 && change.x < GRID_SIZE) {
         if (!clonedRows.has(change.y)) {
           result.grid[change.y] = [...result.grid[change.y]];
@@ -121,19 +130,24 @@ export function processGameState(state, flatGrid, prevGrid) {
         }
         result.grid[change.y][change.x] = change.owner;
       }
-    });
+    }
   }
 
-  // Player index → color index map for grid rendering (reuse from prev if unchanged)
-  if (prevGrid?.playerColorMap && prevGrid.players === result.players) {
+  // Player index → color index map for grid rendering
+  // Rebuild only when player data changes (compare by generating a stable key)
+  const colorMapKey = result.players.map(p => `${p.playerIndex}:${p.colorIndex}`).join(',');
+  if (prevGrid?.playerColorMap && prevGrid._colorMapKey === colorMapKey) {
     result.playerColorMap = prevGrid.playerColorMap;
+    result._colorMapKey = colorMapKey;
   } else {
     result.playerColorMap = {};
-    result.players.forEach((p) => {
+    for (let i = 0; i < result.players.length; i++) {
+      const p = result.players[i];
       if (p.playerIndex !== undefined) {
         result.playerColorMap[p.playerIndex] = p.colorIndex;
       }
-    });
+    }
+    result._colorMapKey = colorMapKey;
   }
 
   return result;

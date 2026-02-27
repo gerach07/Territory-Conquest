@@ -1,6 +1,8 @@
 /* ═══════════════════════════════════════════════════════════
    Territory Conquest – Client Constants (ES Module)
-   Note: GRID_SIZE, TICK_RATE must match server/src/constants.js
+   IMPORTANT: GRID_SIZE, TICK_RATE, and PLAYER_COLORS hex values
+   must match server/src/constants.js. If you change them here,
+   update the server file too (or vice versa) to prevent drift.
    ═══════════════════════════════════════════════════════════ */
 
 export const GRID_SIZE = 80;

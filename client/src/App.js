@@ -133,23 +133,26 @@ function App() {
   const prevPlayersRef = useRef(null);   // positions at tick N-1
   const tickTimeRef    = useRef(0);      // when tick N arrived (performance.now())
 
-  // Keep refs in sync
+  // Keep refs in sync (consolidated into fewer effects)
   useEffect(() => { socketRef.current = socket; }, [socket]);
-  useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
-  useEffect(() => { roomCodeRef.current = roomCode; }, [roomCode]);
-  useEffect(() => { gameTimeLimitRef.current = gameTimeLimit; }, [gameTimeLimit]);
-  useEffect(() => { phaseRef.current = phase; }, [phase]);
-  useEffect(() => { chatOpenRef.current = chatOpen; }, [chatOpen]);
-  useEffect(() => { roomPasswordRef.current = roomPassword; }, [roomPassword]);
-
-  /* ── Kill feed cleanup interval (removes entries older than 5s) ── */
   useEffect(() => {
+    gameStateRef.current = gameState;
+    roomCodeRef.current = roomCode;
+    gameTimeLimitRef.current = gameTimeLimit;
+    phaseRef.current = phase;
+    chatOpenRef.current = chatOpen;
+    roomPasswordRef.current = roomPassword;
+  }, [gameState, roomCode, gameTimeLimit, phase, chatOpen, roomPassword]);
+
+  /* ── Kill feed cleanup interval (only active during game phase) ── */
+  useEffect(() => {
+    if (phase !== 'game') return;
     const killFeedCleanup = setInterval(() => {
       const now = Date.now();
       setKillFeed(prev => prev.filter(kf => now - kf.timestamp < 5000));
     }, 1000);
     return () => clearInterval(killFeedCleanup);
-  }, []);
+  }, [phase]);
 
   /* ── Theme ── */
   useEffect(() => {
@@ -188,12 +191,13 @@ function App() {
         setServerInfo(data);
       } catch { setServerInfo(null); }
     };
-    const startPolling = () => { poll(); intervalId = setInterval(poll, 15000); };
+    const startPolling = () => { poll(); intervalId = setInterval(poll, phase === 'game' ? 60000 : 15000); };
     const stopPolling = () => { clearInterval(intervalId); };
     const onVisibility = () => { document.hidden ? stopPolling() : startPolling(); };
     startPolling();
     document.addEventListener('visibilitychange', onVisibility);
     return () => { stopPolling(); document.removeEventListener('visibilitychange', onVisibility); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverUrl]);
 
   /* ── URL room code ── */

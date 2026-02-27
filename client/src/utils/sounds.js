@@ -6,7 +6,6 @@ let ctx = null;
 let _soundEnabled = false;
 
 export function setSoundEnabled(enabled) { _soundEnabled = !!enabled; }
-export function isSoundEnabled()         { return _soundEnabled; }
 
 function getCtx() {
   if (!ctx) {
@@ -51,10 +50,6 @@ export function playSound(type) {
       break;
     case 'defeat':
       [400, 350, 300, 250].forEach((f, i) => setTimeout(() => tone(f, 0.35, 'sine', 0.2), i * 200));
-      break;
-    case 'turn':
-      tone(880, 0.1, 'sine', 0.15);
-      setTimeout(() => tone(1100, 0.15, 'sine', 0.15), 100);
       break;
     case 'chat':
       tone(1200, 0.05, 'sine', 0.08);

@@ -3,7 +3,7 @@
    ═══════════════════════════════════════════════════════════ */
 let _audio = null;
 let _currentPhase = null;
-let _enabled = false;
+let _enabled = true;
 let _volume = 0.35;
 let _fadeInterval = null;
 
@@ -25,7 +25,6 @@ function fadeOut(audio, durationMs = 400) {
     } else {
       clearInterval(id);
       audio.pause();
-      audio.remove?.();
     }
   }, step);
   return id;
@@ -35,7 +34,7 @@ function stopMusic(fade = true) {
   if (_fadeInterval) clearInterval(_fadeInterval);
   if (_audio) {
     if (fade) { _fadeInterval = fadeOut(_audio); }
-    else { _audio.pause(); _audio.remove?.(); }
+    else { _audio.pause(); }
     _audio = null;
   }
 }
@@ -47,15 +46,12 @@ export function playPhaseMusic(phase) {
   _currentPhase = phase;
   const track = TRACKS[phase];
   if (!track) return;
-  const audio = document.createElement('audio');
+  const audio = new Audio();
   audio.src = track.src;
   audio.loop = track.loop;
   audio.volume = 0;
-  audio.muted = true;
   audio.preload = 'auto';
-  document.body.appendChild(audio);
   audio.play().then(() => {
-    audio.muted = false;
     const rampStep = 30;
     const rampDuration = 600;
     const increment = _volume / (rampDuration / rampStep);
@@ -68,8 +64,7 @@ export function playPhaseMusic(phase) {
       }
     }, rampStep);
   }).catch(() => {
-    // Audio play failed (user gesture required) - clean up orphan element
-    audio.remove();
+    // Audio play failed (user gesture required) - clean up
     _audio = null;
   });
   _audio = audio;
