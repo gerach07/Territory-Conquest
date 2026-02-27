@@ -4,6 +4,7 @@
    (mirrors Battleships client/src/App.js)
    ═══════════════════════════════════════════════════════════ */
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import './App.css';
 import useSocket from './hooks/useSocket';
 import { useI18n } from './i18n/I18nContext';
@@ -114,6 +115,7 @@ function App() {
   const [toast,      setToast]      = useState(null);
   const [serverInfo, setServerInfo] = useState(null);
   const [serverInfoOpen, setServerInfoOpen] = useState(false);
+  const serverInfoBtnRef = useRef(null);
 
   const toastTimer  = useRef(null);
   const socketRef   = useRef(null);
@@ -437,6 +439,7 @@ function App() {
 
   /* ── Join / Create ── */
   const handleJoinRoom = useCallback(async (code, spectate) => {
+    if (!serverUrl) { showToast(t('msg.serverUnreachable'), '❌'); return; }
     try {
       const res  = await fetch(`${serverUrl}/rooms/${code}`);
       const data = await res.json();
@@ -597,16 +600,15 @@ function App() {
                 {lightTheme ? '🌙' : '☀️'}
               </button>
             </div>
-            <div className="relative">
-              <button
-                onClick={() => setServerInfoOpen(o => !o)}
-                className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-[0.65rem] font-semibold cursor-pointer transition border ${isConnected ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20' : 'bg-red-500/10 border-red-500/20 text-red-400 hover:bg-red-500/20'}`}
-                title={t('serverInfo.title')}
-              >
-                <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
-                <span className="hidden sm:inline">{isConnected ? t('app.online') : t('app.offline')}</span>
-              </button>
-            </div>
+            <button
+              ref={serverInfoBtnRef}
+              onClick={() => setServerInfoOpen(o => !o)}
+              className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-[0.65rem] font-semibold cursor-pointer transition border ${isConnected ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20' : 'bg-red-500/10 border-red-500/20 text-red-400 hover:bg-red-500/20'}`}
+              title={t('serverInfo.title')}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
+              <span className="hidden sm:inline">{isConnected ? t('app.online') : t('app.offline')}</span>
+            </button>
             {phase !== 'login' && playerName && (
               <span className="hidden sm:block text-xs font-bold text-slate-300 max-w-[6rem] truncate" title={playerName}>{playerName}</span>
             )}
@@ -614,26 +616,75 @@ function App() {
         </div>
       </header>
 
-      {/* ── Server info dropdown ── */}
-      {serverInfoOpen && (
+      {/* Server info dropdown — portalled to document.body, positioned under the button */}
+      {serverInfoOpen && createPortal(
         <>
-          <div className="fixed inset-0 z-20" onClick={() => setServerInfoOpen(false)} />
-          <div className="absolute top-14 right-4 z-30 glass-card p-4 w-64 space-y-2 animate-fade-in">
-            <h3 className="text-sm font-bold text-slate-300">{t('serverInfo.title')}</h3>
-            {serverInfo ? (
-              <div className="text-xs space-y-1 text-slate-400">
-                {serverInfo.version  && <p>Version: v{serverInfo.version}</p>}
-                {serverInfo.rooms !== undefined    && <p>{t('serverInfo.rooms')}: {serverInfo.rooms}</p>}
-                {serverInfo.players !== undefined  && <p>{t('serverInfo.players')}: {serverInfo.players}</p>}
-                {serverInfo.uptime !== undefined    && <p>{t('serverInfo.uptime')}: {formatUptime(serverInfo.uptime)}</p>}
-                {serverInfo.nodeVersion            && <p>{t('serverInfo.node')}: {serverInfo.nodeVersion}</p>}
-                {serverInfo.memoryMB !== undefined  && <p>{t('serverInfo.memory')}: {serverInfo.memoryMB} MB</p>}
+          <div className="fixed inset-0 z-[9998]" onClick={() => setServerInfoOpen(false)} />
+          <div
+            className="fixed z-[9999] w-72 rounded-2xl overflow-hidden shadow-2xl border border-slate-500/20"
+            style={{
+              background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.97), rgba(30, 41, 59, 0.97))',
+              backdropFilter: 'blur(24px)',
+              top: serverInfoBtnRef.current
+                ? serverInfoBtnRef.current.getBoundingClientRect().bottom + 8 + 'px'
+                : '48px',
+              right: serverInfoBtnRef.current
+                ? (window.innerWidth - serverInfoBtnRef.current.getBoundingClientRect().right) + 'px'
+                : '12px',
+              animation: 'serverInfoSlideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+              transformOrigin: 'top right',
+            }}
+          >
+            {/* Header with connection status */}
+            <div className={`px-4 py-3 flex items-center gap-2.5 ${isConnected ? 'bg-gradient-to-r from-emerald-500/15 to-emerald-500/5' : 'bg-gradient-to-r from-red-500/15 to-red-500/5'}`}>
+              <span className={`relative w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-red-400'}`}>
+                {isConnected && <span className="absolute inset-0 rounded-full bg-emerald-400 animate-ping opacity-50" />}
+              </span>
+              <span className={`text-sm font-bold ${isConnected ? 'text-emerald-300' : 'text-red-300'}`}>
+                {isConnected ? t('app.online') : t('app.offline')}
+              </span>
+              <span className="ml-auto text-[0.6rem] text-slate-500 font-mono">
+                {serverInfo ? `v${serverInfo.version}` : ''}
+              </span>
+            </div>
+
+            {serverInfo && (
+              <div className="p-4 space-y-3 text-xs">
+                {/* Stats Grid */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="bg-slate-800/50 rounded-xl p-3 text-center border border-slate-700/30">
+                    <p className="text-blue-400 text-2xl font-black">{serverInfo.rooms}</p>
+                    <p className="text-slate-500 text-[0.6rem] mt-0.5 uppercase tracking-wider font-semibold">{t('serverInfo.rooms')}</p>
+                  </div>
+                  <div className="bg-slate-800/50 rounded-xl p-3 text-center border border-slate-700/30">
+                    <p className="text-blue-400 text-2xl font-black">{serverInfo.players}</p>
+                    <p className="text-slate-500 text-[0.6rem] mt-0.5 uppercase tracking-wider font-semibold">{t('serverInfo.players')}</p>
+                  </div>
+                </div>
+
+                {/* Divider */}
+                <div className="h-px bg-gradient-to-r from-transparent via-slate-600/50 to-transparent" />
+
+                {/* Detail rows */}
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-500">{t('serverInfo.uptime')}</span>
+                    <span className="text-slate-300 font-mono bg-slate-800/50 px-2 py-0.5 rounded-md">{formatUptime(serverInfo.uptime)}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-500">{t('serverInfo.node')}</span>
+                    <span className="text-slate-300 font-mono bg-slate-800/50 px-2 py-0.5 rounded-md">{serverInfo.nodeVersion}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-500">{t('serverInfo.memory')}</span>
+                    <span className="text-slate-300 font-mono bg-slate-800/50 px-2 py-0.5 rounded-md">{serverInfo.memoryMB}MB</span>
+                  </div>
+                </div>
               </div>
-            ) : (
-              <p className="text-xs text-red-400">{t('app.offline')}</p>
             )}
           </div>
-        </>
+        </>,
+        document.body
       )}
 
       {/* ── Main content ── */}

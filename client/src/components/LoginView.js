@@ -53,7 +53,7 @@ const LoginView = memo(({
       setRooms(data.rooms || []);
     } catch { setRooms([]); }
     setRoomsLoading(false);
-  }, []);
+  }, [serverUrl]);
 
   useEffect(() => { if (loginView === 'join') fetchRooms(); }, [loginView, fetchRooms]);
 
