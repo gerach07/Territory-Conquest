@@ -22,13 +22,56 @@ const clampSpecCam = (cam) => {
 const PLAYER_COLORS_ALPHA40 = PLAYER_COLORS.map(c => c + '40');
 const PLAYER_COLORS_ALPHA80 = PLAYER_COLORS.map(c => c + '80');
 
-// Stable interpolation helper (module-level to avoid per-frame closure allocation)
+// Direction vectors for client-side extrapolation
+const DIR_VECTORS = { up: { dx: 0, dy: -1 }, down: { dx: 0, dy: 1 }, left: { dx: -1, dy: 0 }, right: { dx: 1, dy: 0 } };
+
+// Stable interpolation + extrapolation helper
+// When t_lerp < 1: interpolate between previous and current server positions
+// When t_lerp >= 1: extrapolate forward in the player's current direction
+// This eliminates the visual "freeze" while waiting for the next server tick
 function getInterpPos(p, prev, t_lerp) {
   const pp = prev[p.id];
-  if (!pp || !p.alive) return { ix: p.x, iy: p.y };
+  if (!pp || !p.alive) {
+    // No previous position — extrapolate from current position if past tick time
+    if (p.alive && t_lerp > 1 && p.direction) {
+      const dv = DIR_VECTORS[p.direction];
+      if (dv) {
+        const extra = t_lerp - 1;
+        const ex = p.x + dv.dx * extra;
+        const ey = p.y + dv.dy * extra;
+        return { ix: Math.max(0, Math.min(GRID_SIZE - 1, ex)), iy: Math.max(0, Math.min(GRID_SIZE - 1, ey)) };
+      }
+    }
+    return { ix: p.x, iy: p.y };
+  }
   const dx = Math.abs(p.x - pp.x), dy = Math.abs(p.y - pp.y);
-  if (dx > 1 || dy > 1) return { ix: p.x, iy: p.y };
-  return { ix: pp.x + (p.x - pp.x) * t_lerp, iy: pp.y + (p.y - pp.y) * t_lerp };
+  if (dx > 1 || dy > 1) {
+    // Teleport / respawn — no interpolation, but still extrapolate past t=1
+    if (t_lerp > 1 && p.direction) {
+      const dv = DIR_VECTORS[p.direction];
+      if (dv) {
+        const extra = t_lerp - 1;
+        const ex = p.x + dv.dx * extra;
+        const ey = p.y + dv.dy * extra;
+        return { ix: Math.max(0, Math.min(GRID_SIZE - 1, ex)), iy: Math.max(0, Math.min(GRID_SIZE - 1, ey)) };
+      }
+    }
+    return { ix: p.x, iy: p.y };
+  }
+  if (t_lerp <= 1) {
+    return { ix: pp.x + (p.x - pp.x) * t_lerp, iy: pp.y + (p.y - pp.y) * t_lerp };
+  }
+  // Extrapolate beyond current tick in the player's direction
+  if (p.direction) {
+    const dv = DIR_VECTORS[p.direction];
+    if (dv) {
+      const extra = t_lerp - 1;
+      const ex = p.x + dv.dx * extra;
+      const ey = p.y + dv.dy * extra;
+      return { ix: Math.max(0, Math.min(GRID_SIZE - 1, ex)), iy: Math.max(0, Math.min(GRID_SIZE - 1, ey)) };
+    }
+  }
+  return { ix: p.x, iy: p.y };
 }
 
 /* ── Death overlay with countdown (memoized) ── */
@@ -330,10 +373,11 @@ const GameCanvas = memo(({
       const w = canvas.width;
       const h = canvas.height;
 
-      // Interpolation factor: how far between prev tick and next tick (0..1, clamped)
+      // Interpolation factor: how far between prev tick and next tick
+      // Allow values > 1.0 for extrapolation (smooth movement prediction)
       const now = performance.now();
       const elapsed = now - (tickTimeRef.current || now);
-      const t_lerp = Math.min(elapsed / TICK_MS, 1);
+      const t_lerp = Math.min(elapsed / TICK_MS, 1.8); // cap at 1.8 to avoid over-extrapolation
       const prev = prevPlayersRef.current || {};
 
       const me = gs.players?.find(p => p.id === myIdRef.current);

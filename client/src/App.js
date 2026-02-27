@@ -678,7 +678,7 @@ function App() {
   const handleDirectionChange = useCallback((dir) => {
     socketRef.current?.emit('changeDirection', { direction: dir });
 
-    // Client-side prediction: immediately update own player direction + position
+    // Client-side prediction: immediately update own player direction
     const gs = gameStateRef.current;
     if (!gs?.players) return;
     const meIdx = gs.players.findIndex(p => p.id === socketRef.current?.id);
@@ -688,16 +688,18 @@ function App() {
 
     const opposites = { up: 'down', down: 'up', left: 'right', right: 'left' };
     if (opposites[me.direction] === dir) return; // server would reject this
-
-    const dirs = { up: { dx: 0, dy: -1 }, down: { dx: 0, dy: 1 }, left: { dx: -1, dy: 0 }, right: { dx: 1, dy: 0 } };
-    const d = dirs[dir];
-    if (!d) return;
+    if (me.direction === dir) return; // already heading that way
 
     const updated = [...gs.players];
     updated[meIdx] = { ...me, direction: dir };
     const newGs = { ...gs, players: updated };
     gameStateRef.current = newGs;
     setGameState(newGs);
+
+    // Reset interpolation origin so canvas extrapolates from current position
+    // in the NEW direction instead of continuing in the old one
+    prevPlayersRef.current = { ...prevPlayersRef.current, [me.id]: { x: me.x, y: me.y } };
+    tickTimeRef.current = performance.now();
   }, []);
 
   const handleLeaveGame = useCallback(() => {
