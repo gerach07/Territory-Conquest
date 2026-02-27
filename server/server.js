@@ -396,6 +396,10 @@ io.on('connection', (socket) => {
     const opposites = { up: 'down', down: 'up', left: 'right', right: 'left' };
     if (opposites[player.direction] === direction) return;
     player.direction = direction;
+    // Track last confirmed input sequence for client-side prediction reconciliation
+    if (typeof payload.seq === 'number') {
+      player.lastInputSeq = payload.seq;
+    }
   });
 
   // ── CHAT ──

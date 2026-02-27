@@ -208,6 +208,7 @@ class Room {
       color: PLAYER_COLORS[colorIndex] || PLAYER_COLORS[0],
       x: 0, y: 0, direction: 'right', trail: [],
       alive: true, deathTime: 0, score: 0, kills: 0,
+      lastInputSeq: 0,
       joinedAt: Date.now(),
     };
     return true;
@@ -658,6 +659,7 @@ class Room {
         t: trailArr,
         a: p.alive ? 1 : 0,
         s: p.score, k: p.kills,
+        lis: p.lastInputSeq || 0,
         // Static fields needed for first render / reconnection
         name: p.name, colorIndex: p.colorIndex, playerIndex: p.playerIndex,
         forfeited: p.forfeited || false,

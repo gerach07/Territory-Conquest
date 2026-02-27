@@ -23,10 +23,6 @@ import ConnectionOverlay from './components/ConnectionOverlay';
 // Direction vectors for local simulation
 const DIR_V = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
 
-function clamp(v, min, max) {
-  return Math.max(min, Math.min(max, v));
-}
-
 /* ── Floating bubble background ───────────────────────────── */
 const BUBBLE_COUNT = 14;
 
@@ -152,11 +148,15 @@ function App() {
     x: 0, y: 0,         // current sim position (integer cells)
     prevX: 0, prevY: 0, // position at previous local tick
     direction: 'right',  // current direction
-    pendingDir: null,    // direction change server hasn't confirmed yet
     tickTime: 0,        // performance.now() of last local tick
+    simTick: 0,         // local simulation tick counter
+    visualOffsetX: 0,   // smooth visual correction offset (decays over time)
+    visualOffsetY: 0,
     alive: false,
     active: false,
   });
+  const inputSeqRef = useRef(0);     // monotonic input sequence counter
+  const inputBufferRef = useRef([]); // unconfirmed inputs: [{seq, dir}]
 
   // Keep refs in sync (consolidated into fewer effects)
   useEffect(() => { socketRef.current = socket; }, [socket]);
@@ -223,10 +223,12 @@ function App() {
         sim.direction = me.direction || 'right';
         sim.alive = me.alive;
         sim.tickTime = performance.now();
+        sim.simTick = 0;
+        sim.visualOffsetX = 0;
+        sim.visualOffsetY = 0;
       }
     }
     sim.active = true;
-    sim.pendingDir = null;
 
     const interval = setInterval(() => {
       if (!sim.active || !sim.alive) return;
@@ -234,11 +236,19 @@ function App() {
       sim.prevX = sim.x;
       sim.prevY = sim.y;
       sim.tickTime = performance.now();
+      sim.simTick++;
       // Advance 1 cell in current direction (matches server exactly)
       const dv = DIR_V[sim.direction];
       if (dv) {
-        sim.x = clamp(sim.x + dv[0], 0, GRID_SIZE - 1);
-        sim.y = clamp(sim.y + dv[1], 0, GRID_SIZE - 1);
+        const nx = sim.x + dv[0];
+        const ny = sim.y + dv[1];
+        // Match server behavior: boundary = death (don't clamp)
+        if (nx < 0 || nx >= GRID_SIZE || ny < 0 || ny >= GRID_SIZE) {
+          sim.alive = false;
+          return;
+        }
+        sim.x = nx;
+        sim.y = ny;
       }
     }, TICK_MS);
 
@@ -404,6 +414,9 @@ function App() {
       gameStateRef.current = gs;
       setGameState(gs);
       lastServerSeqRef.current = 0;
+      // Reset input tracking for new game
+      inputSeqRef.current = 0;
+      inputBufferRef.current = [];
       // Initialize local sim from game start positions
       const sim = localSimRef.current;
       const myId = socketRef.current?.id;
@@ -415,7 +428,9 @@ function App() {
           sim.direction = me.direction || 'right';
           sim.alive = me.alive;
           sim.tickTime = performance.now();
-          sim.pendingDir = null;
+          sim.simTick = 0;
+          sim.visualOffsetX = 0;
+          sim.visualOffsetY = 0;
           sim.active = true;
         }
       }
@@ -457,44 +472,68 @@ function App() {
         if (meIdx !== -1) {
           const serverMe = gs.players[meIdx];
 
+          // Remove confirmed inputs from buffer
+          const serverLIS = serverMe.lis || 0;
+          inputBufferRef.current = inputBufferRef.current.filter(i => i.seq > serverLIS);
+          const hasUnconfirmed = inputBufferRef.current.length > 0;
+
           if (!serverMe.alive) {
             // Server says we're dead
             sim.alive = false;
-          } else {
+          } else if (!sim.alive) {
+            // Server says alive but we thought dead (respawn)
             sim.alive = true;
-            const dist = Math.abs(serverMe.x - sim.x) + Math.abs(serverMe.y - sim.y);
+            sim.x = serverMe.x; sim.y = serverMe.y;
+            sim.prevX = serverMe.x; sim.prevY = serverMe.y;
+            sim.direction = serverMe.direction;
+            sim.visualOffsetX = 0; sim.visualOffsetY = 0;
+            inputBufferRef.current = [];
+          } else {
+            const dx = sim.x - serverMe.x;
+            const dy = sim.y - serverMe.y;
+            const dist = Math.abs(dx) + Math.abs(dy);
 
-            if (sim.pendingDir) {
-              // We have a pending direction change
-              if (serverMe.direction === sim.pendingDir) {
-                // Server confirmed! Clear pending flag.
-                sim.pendingDir = null;
-                // If within 2 cells, nudge toward server. Otherwise snap.
-                if (dist <= 2) {
-                  // Blend: move halfway toward server position
-                  sim.x = Math.round(sim.x + (serverMe.x - sim.x) * 0.5);
-                  sim.y = Math.round(sim.y + (serverMe.y - sim.y) * 0.5);
-                } else {
-                  sim.x = serverMe.x; sim.y = serverMe.y;
-                  sim.prevX = serverMe.x; sim.prevY = serverMe.y;
-                }
-              }
-              // else: stale tick, server still shows old direction — ignore position
-            } else {
-              // No pending change — adopt server direction always
+            if (dist > 10) {
+              // Very large discrepancy (respawn/teleport) — snap immediately
+              sim.x = serverMe.x; sim.y = serverMe.y;
+              sim.prevX = serverMe.x; sim.prevY = serverMe.y;
               sim.direction = serverMe.direction;
-              if (dist > 3) {
-                // Large discrepancy (respawn/teleport) — snap immediately
+              sim.visualOffsetX = 0; sim.visualOffsetY = 0;
+              inputBufferRef.current = [];
+            } else if (hasUnconfirmed) {
+              // Server hasn't processed our latest inputs yet.
+              // Our local sim is intentionally diverged — don't correct.
+              // Safety: if too many unconfirmed inputs, something is wrong
+              if (inputBufferRef.current.length > 15) {
+                inputBufferRef.current = [];
                 sim.x = serverMe.x; sim.y = serverMe.y;
                 sim.prevX = serverMe.x; sim.prevY = serverMe.y;
-              } else if (dist > 0) {
-                // Small drift — blend toward server (1 cell per tick max)
-                const dx = serverMe.x - sim.x;
-                const dy = serverMe.y - sim.y;
-                if (Math.abs(dx) > Math.abs(dy)) {
-                  sim.x += Math.sign(dx);
-                } else if (dy !== 0) {
-                  sim.y += Math.sign(dy);
+                sim.direction = serverMe.direction;
+                sim.visualOffsetX = 0; sim.visualOffsetY = 0;
+              }
+            } else {
+              // All inputs confirmed — server is authoritative
+              sim.direction = serverMe.direction;
+
+              if (dist > 0) {
+                // Check if error is just the expected forward lead
+                // (client sim is a few ticks ahead of server state)
+                const dv = DIR_V[sim.direction] || [0, 0];
+                const forward = dx * dv[0] + dy * dv[1]; // projection onto movement dir
+                const lateralDist = dist - Math.abs(forward);
+
+                if (lateralDist === 0 && forward > 0 && forward <= 4) {
+                  // Pure forward lead within tolerance — expected, don't correct
+                } else {
+                  // Real error: smooth correct via visual offset
+                  sim.visualOffsetX += dx;
+                  sim.visualOffsetY += dy;
+                  sim.x = serverMe.x;
+                  sim.y = serverMe.y;
+                  // Set prev so interpolation continues smoothly from new position
+                  const mvDir = DIR_V[sim.direction] || [0, 0];
+                  sim.prevX = sim.x - mvDir[0];
+                  sim.prevY = sim.y - mvDir[1];
                 }
               }
             }
@@ -581,7 +620,7 @@ function App() {
       setGameState(null);
       lastServerSeqRef.current = 0;
       localSimRef.current.active = false;
-      localSimRef.current.pendingDir = null;
+      inputBufferRef.current = [];
       setGameOverData(null);
       setIsDead(false);
       setKillFeed([]);
@@ -823,8 +862,6 @@ function App() {
 
   /* ── Game actions ── */
   const handleDirectionChange = useCallback((dir) => {
-    socketRef.current?.emit('changeDirection', { direction: dir });
-
     const gs = gameStateRef.current;
     if (!gs?.players) return;
     const meIdx = gs.players.findIndex(p => p.id === socketRef.current?.id);
@@ -836,6 +873,13 @@ function App() {
     if (opposites[me.direction] === dir) return; // server would reject this
     if (me.direction === dir) return; // already heading that way
 
+    // Assign sequence number and track in input buffer
+    const seq = ++inputSeqRef.current;
+    inputBufferRef.current.push({ seq, dir });
+
+    // Send to server with sequence number
+    socketRef.current?.emit('changeDirection', { direction: dir, seq });
+
     // Update game state direction locally
     const updated = [...gs.players];
     updated[meIdx] = { ...me, direction: dir };
@@ -846,7 +890,6 @@ function App() {
     // Update local simulation immediately
     const sim = localSimRef.current;
     sim.direction = dir;
-    sim.pendingDir = dir; // mark as pending until server confirms
   }, []);
 
   const handleLeaveGame = useCallback(() => {

@@ -129,6 +129,9 @@ const GameCanvas = memo(({
   // Last font size to avoid redundant ctx.font changes
   const lastFontSizeRef = useRef(0);
 
+  // Previous frame time for visual offset decay computation
+  const prevFrameTimeRef = useRef(0);
+
   // Spectator camera state
   const [followPlayer, setFollowPlayer] = useState(null); // null = overview, playerId = follow
   const specCamRef = useRef({ x: GRID_SIZE / 2, y: GRID_SIZE / 2, zoom: 1 }); // free camera
@@ -383,14 +386,27 @@ const GameCanvas = memo(({
       // ── Local simulation rendering for own player ──
       // The local sim ticks at 10Hz (same as server), so we interpolate
       // between sim.prevX/Y and sim.x/y at 60fps for smooth movement.
+      // Visual offset decays exponentially to smooth out server corrections.
       const sim = localSim?.current;
       let meInterp;
       if (me && sim && sim.active && sim.alive) {
+        // Decay visual offset (exponential decay, ~200ms to clear)
+        const prevFrame = prevFrameTimeRef.current || now;
+        const dt = Math.min((now - prevFrame) / 1000, 0.05); // cap at 50ms
+        if (dt > 0) {
+          const decay = Math.exp(-15 * dt); // rate 15 → ~200ms to clear 95%
+          sim.visualOffsetX *= decay;
+          sim.visualOffsetY *= decay;
+          if (Math.abs(sim.visualOffsetX) < 0.01) sim.visualOffsetX = 0;
+          if (Math.abs(sim.visualOffsetY) < 0.01) sim.visualOffsetY = 0;
+        }
+        prevFrameTimeRef.current = now;
+
         const simElapsed = now - (sim.tickTime || now);
         const t = Math.min(simElapsed / TICK_MS, 1.0); // clamp to [0,1] — no extrapolation past sim tick
         meInterp = {
-          ix: sim.prevX + (sim.x - sim.prevX) * t,
-          iy: sim.prevY + (sim.y - sim.prevY) * t,
+          ix: sim.prevX + (sim.x - sim.prevX) * t + sim.visualOffsetX,
+          iy: sim.prevY + (sim.y - sim.prevY) * t + sim.visualOffsetY,
         };
       } else if (me) {
         // Fallback: normal interpolation (spectator, dead, or sim not active)

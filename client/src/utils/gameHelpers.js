@@ -100,6 +100,7 @@ export function processGameState(state, flatGrid, prevGrid) {
           score:       p.s !== undefined ? p.s : p.score,
           kills:       p.k !== undefined ? p.k : p.kills,
           playerIndex: p.playerIndex,
+          lis:         p.lis || 0,
           spectator:   false,
           forfeited:   p.forfeited || false,
         };
