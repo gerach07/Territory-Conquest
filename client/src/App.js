@@ -11,6 +11,7 @@ import { useI18n } from './i18n/I18nContext';
 import { buildWaitingData, processGameState, formatUptime, getRoomFromURL, setURLRoom } from './utils/gameHelpers';
 import { playSound, setSoundEnabled } from './utils/sounds';
 import { playPhaseMusic } from './utils/music';
+import { TICK_MS } from './constants';
 
 import LoginView        from './components/LoginView';
 import WaitingRoom      from './components/WaitingRoom';
@@ -132,6 +133,12 @@ function App() {
   // Interpolation: store previous player positions + tick timestamp
   const prevPlayersRef = useRef(null);   // positions at tick N-1
   const tickTimeRef    = useRef(0);      // when tick N arrived (performance.now())
+
+  // Client-side prediction: smooth movement on high-latency connections
+  // When user changes direction, we predict locally and ignore server ticks
+  // until the server confirms the new direction.
+  const localPredictionRef = useRef(null); // { startX, startY, direction, startTime }
+  const correctionRef = useRef({ x: 0, y: 0 }); // smooth error correction offset
 
   // Keep refs in sync (consolidated into fewer effects)
   useEffect(() => { socketRef.current = socket; }, [socket]);
@@ -349,6 +356,9 @@ function App() {
     const onGameState = (state) => {
       // Snapshot previous positions for interpolation
       const prevGs = gameStateRef.current;
+      const myId = socketRef.current?.id;
+      const prediction = localPredictionRef.current;
+
       if (prevGs?.players) {
         const snap = {};
         prevGs.players.forEach(p => { snap[p.id] = { x: p.x, y: p.y }; });
@@ -359,6 +369,56 @@ function App() {
       // processGameState now handles state.fullGrid (periodic full sync)
       // as well as state.gridChanges (incremental)
       const gs = processGameState(state, null, prevGs?.grid);
+
+      // ── Client-side prediction reconciliation ──
+      // When we have an active local prediction (pending direction change),
+      // check if the server has confirmed our direction. Until it does,
+      // keep our predicted direction + position for the local player to
+      // avoid jarring snap-back from stale server ticks.
+      if (prediction && gs.players && myId) {
+        const meIdx = gs.players.findIndex(p => p.id === myId);
+        if (meIdx !== -1) {
+          const serverMe = gs.players[meIdx];
+          const elapsed = performance.now() - prediction.startTime;
+
+          if (serverMe.direction === prediction.direction) {
+            // Server caught up! Accept server position.
+            // Calculate smooth correction offset: difference between
+            // where we were visually predicting and where server says we are.
+            const predCells = elapsed / TICK_MS;
+            const DIR_V = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+            const dv = DIR_V[prediction.direction] || [0, 0];
+            const predX = prediction.startX + dv[0] * predCells;
+            const predY = prediction.startY + dv[1] * predCells;
+            correctionRef.current = {
+              x: predX - serverMe.x,
+              y: predY - serverMe.y,
+            };
+            localPredictionRef.current = null;
+          } else if (elapsed < 600) {
+            // Server hasn't processed our direction change yet.
+            // Keep our predicted direction and position to avoid snap-back.
+            const updated = [...gs.players];
+            updated[meIdx] = {
+              ...serverMe,
+              direction: prediction.direction,
+              x: prediction.startX,
+              y: prediction.startY,
+            };
+            gs.players = updated;
+            // Keep prevPlayers from prediction origin so extrapolation works
+            prevPlayersRef.current[myId] = { x: prediction.startX, y: prediction.startY };
+            // Don't reset tickTime for local player - keep original prediction time
+            // so extrapolation continues smoothly
+            tickTimeRef.current = prediction.startTime - 100;
+          } else {
+            // Safety timeout: accept server position after 600ms
+            localPredictionRef.current = null;
+            correctionRef.current = { x: 0, y: 0 };
+          }
+        }
+      }
+
       // CRITICAL: update ref synchronously so the *next* event in the same
       // microtask batch sees the correct previous grid.
       gameStateRef.current = gs;
@@ -696,10 +756,20 @@ function App() {
     gameStateRef.current = newGs;
     setGameState(newGs);
 
-    // Reset interpolation origin so canvas extrapolates from current position
-    // in the NEW direction instead of continuing in the old one
+    // Start local prediction: track where prediction began so GameCanvas
+    // can smoothly move the player in the new direction independent of
+    // server ticks. This eliminates the 100ms dead zone AND prevents
+    // snap-back when stale server ticks arrive.
+    localPredictionRef.current = {
+      startX: me.x,
+      startY: me.y,
+      direction: dir,
+      startTime: performance.now(),
+    };
+
+    // Reset interpolation so extrapolation starts immediately
     prevPlayersRef.current = { ...prevPlayersRef.current, [me.id]: { x: me.x, y: me.y } };
-    tickTimeRef.current = performance.now();
+    tickTimeRef.current = performance.now() - 100; // t_lerp starts > 1.0 → immediate extrapolation
   }, []);
 
   const handleLeaveGame = useCallback(() => {
@@ -926,6 +996,8 @@ function App() {
             lightTheme={lightTheme}
             prevPlayers={prevPlayersRef}
             tickTime={tickTimeRef}
+            localPrediction={localPredictionRef}
+            correction={correctionRef}
           />
         )}
 

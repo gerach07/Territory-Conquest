@@ -105,6 +105,7 @@ const GameCanvas = memo(({
   timeRemaining, killFeed,
   lightTheme,
   prevPlayers, tickTime,
+  localPrediction, correction,
 }) => {
   const { t }       = useI18n();
   const canvasRef    = useRef(null);
@@ -114,6 +115,8 @@ const GameCanvas = memo(({
   const prevPlayersRef = useRef(null);
   const tickTimeRef    = useRef(0);
   const isSpectatorRef = useRef(isSpectator);
+  const localPredictionRef = useRef(null);
+  const correctionRef = useRef({ x: 0, y: 0 });
 
   // Cache canvas 2D context
   const ctxRef = useRef(null);
@@ -144,7 +147,7 @@ const GameCanvas = memo(({
     gridDirtyRef.current = true;
   }, [gameState]);
   useEffect(() => { myIdRef.current = myId; }, [myId]);
-  useEffect(() => { prevPlayersRef.current = prevPlayers?.current; tickTimeRef.current = tickTime?.current; }, [prevPlayers, tickTime]);
+  useEffect(() => { prevPlayersRef.current = prevPlayers?.current; tickTimeRef.current = tickTime?.current; localPredictionRef.current = localPrediction?.current; correctionRef.current = correction?.current || { x: 0, y: 0 }; }, [prevPlayers, tickTime, localPrediction, correction]);
   useEffect(() => { followPlayerRef.current = followPlayer; }, [followPlayer]);
   useEffect(() => { isSpectatorRef.current = isSpectator; }, [isSpectator]);
 
@@ -377,11 +380,51 @@ const GameCanvas = memo(({
       // Allow values > 1.0 for extrapolation (smooth movement prediction)
       const now = performance.now();
       const elapsed = now - (tickTimeRef.current || now);
-      const t_lerp = Math.min(elapsed / TICK_MS, 1.8); // cap at 1.8 to avoid over-extrapolation
+      const t_lerp = Math.min(elapsed / TICK_MS, 3.5); // allow up to 3.5 ticks of extrapolation for high-latency
       const prev = prevPlayersRef.current || {};
 
       const me = gs.players?.find(p => p.id === myIdRef.current);
-      const meInterp = me ? getInterpPos(me, prev, t_lerp) : null;
+
+      // ── Client-side prediction for local player ──
+      // When localPrediction is active, position the local player based on
+      // predicted movement since the key press rather than server interpolation.
+      // This eliminates the dead zone and prevents snap-back.
+      const prediction = localPredictionRef.current;
+      const corr = correctionRef.current;
+      let meInterp;
+      if (me && prediction && me.alive) {
+        // Calculate predicted position: cells moved = time since key press / tick interval
+        const predElapsed = now - prediction.startTime;
+        const cellsMoved = predElapsed / TICK_MS;
+        const dv = DIR_VECTORS[prediction.direction];
+        if (dv) {
+          meInterp = {
+            ix: prediction.startX + dv.dx * cellsMoved,
+            iy: prediction.startY + dv.dy * cellsMoved,
+          };
+          // Clamp to grid bounds
+          meInterp.ix = Math.max(0, Math.min(GRID_SIZE - 1, meInterp.ix));
+          meInterp.iy = Math.max(0, Math.min(GRID_SIZE - 1, meInterp.iy));
+        } else {
+          meInterp = { ix: me.x, iy: me.y };
+        }
+      } else if (me) {
+        // Normal interpolation/extrapolation (no active prediction)
+        meInterp = getInterpPos(me, prev, t_lerp);
+        // Apply smooth correction offset (decays each frame)
+        if (corr && (Math.abs(corr.x) > 0.01 || Math.abs(corr.y) > 0.01)) {
+          meInterp.ix += corr.x;
+          meInterp.iy += corr.y;
+          // Decay correction by ~15% each frame (~60fps → fades in ~150ms)
+          corr.x *= 0.85;
+          corr.y *= 0.85;
+        } else if (corr) {
+          corr.x = 0;
+          corr.y = 0;
+        }
+      } else {
+        meInterp = null;
+      }
 
       // Camera: spectator uses free cam or follows a player
       let camX, camY, viewCells, cellSize;
@@ -504,11 +547,12 @@ const GameCanvas = memo(({
         gs.players.forEach(p => {
           if (!p.alive) return;
           const color = PLAYER_COLORS[p.colorIndex] || '#ffffff';
-          const { ix, iy } = getInterpPos(p, prev, t_lerp);
+          const isSelf = p.id === myCurrentId;
+          // Use predicted position for local player, normal interpolation for others
+          const { ix, iy } = (isSelf && meInterp) ? meInterp : getInterpPos(p, prev, t_lerp);
           const px = ix * cellSize + ox;
           const py = iy * cellSize + oy;
           const s = cellSize;
-          const isSelf = p.id === myCurrentId;
 
           if (isSelf) { ctx.shadowColor = color; ctx.shadowBlur = 12; }
           ctx.fillStyle = color;
@@ -551,10 +595,11 @@ const GameCanvas = memo(({
       if (gs.players) {
         gs.players.forEach(p => {
           if (!p.alive) return;
-          const { ix, iy } = getInterpPos(p, prev, t_lerp);
-          ctx.fillStyle = p.id === myIdRef.current ? '#ffffff' : (PLAYER_COLORS[p.colorIndex] || '#ffffff');
+          const isSelf = p.id === myIdRef.current;
+          const { ix, iy } = (isSelf && meInterp) ? meInterp : getInterpPos(p, prev, t_lerp);
+          ctx.fillStyle = isSelf ? '#ffffff' : (PLAYER_COLORS[p.colorIndex] || '#ffffff');
           ctx.beginPath();
-          ctx.arc(mx + ix * scale, my + iy * scale, p.id === myIdRef.current ? 3 : 2, 0, Math.PI * 2);
+          ctx.arc(mx + ix * scale, my + iy * scale, isSelf ? 3 : 2, 0, Math.PI * 2);
           ctx.fill();
         });
       }
