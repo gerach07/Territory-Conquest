@@ -3,7 +3,7 @@
    Full-screen canvas rendering, minimap, leaderboard, input
    ═══════════════════════════════════════════════════════════ */
 import React, { useRef, useEffect, useCallback, memo } from 'react';
-import { GRID_SIZE, PLAYER_COLORS } from '../constants';
+import { GRID_SIZE, PLAYER_COLORS, TICK_MS } from '../constants';
 import { useI18n } from '../i18n/I18nContext';
 import { escapeHtml } from '../utils/gameHelpers';
 
@@ -12,16 +12,20 @@ const GameCanvas = memo(({
   onDirectionChange, onSurrender,
   timeRemaining, killFeed,
   lightTheme,
+  prevPlayers, tickTime,
 }) => {
   const { t }       = useI18n();
   const canvasRef    = useRef(null);
   const animFrameRef = useRef(null);
   const gameStateRef = useRef(gameState);
   const myIdRef      = useRef(myId);
+  const prevPlayersRef = useRef(null);
+  const tickTimeRef    = useRef(0);
 
   // Keep refs current
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
   useEffect(() => { myIdRef.current = myId; }, [myId]);
+  useEffect(() => { prevPlayersRef.current = prevPlayers?.current; tickTimeRef.current = tickTime?.current; }, [prevPlayers, tickTime, gameState]);
 
   /* ── Keyboard input ── */
   useEffect(() => {
@@ -45,6 +49,41 @@ const GameCanvas = memo(({
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
+  }, [onDirectionChange]);
+
+  /* ── Touch / swipe input (mobile) ── */
+  useEffect(() => {
+    let startX = 0, startY = 0;
+    const MIN_SWIPE = 20; // min px distance to register swipe
+
+    const onTouchStart = (e) => {
+      const touch = e.touches[0];
+      startX = touch.clientX;
+      startY = touch.clientY;
+    };
+
+    const onTouchEnd = (e) => {
+      const touch = e.changedTouches[0];
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      const absDx = Math.abs(dx), absDy = Math.abs(dy);
+      if (Math.max(absDx, absDy) < MIN_SWIPE) return;
+
+      let dir;
+      if (absDx > absDy) {
+        dir = dx > 0 ? 'right' : 'left';
+      } else {
+        dir = dy > 0 ? 'down' : 'up';
+      }
+      onDirectionChange(dir);
+    };
+
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchend', onTouchEnd, { passive: true });
+    return () => {
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchend', onTouchEnd);
+    };
   }, [onDirectionChange]);
 
   /* ── Canvas resize ── */
@@ -73,10 +112,31 @@ const GameCanvas = memo(({
 
       const w = canvas.width;
       const h = canvas.height;
-      const me = gs.players?.find(p => p.id === myIdRef.current);
 
-      const camX = me ? me.x : GRID_SIZE / 2;
-      const camY = me ? me.y : GRID_SIZE / 2;
+      // Interpolation factor: how far between prev tick and next tick (0..1, clamped)
+      const now = performance.now();
+      const elapsed = now - (tickTimeRef.current || now);
+      const t_lerp = Math.min(elapsed / TICK_MS, 1);
+      const prev = prevPlayersRef.current || {};
+
+      // Helper: get interpolated position for a player
+      const getInterp = (p) => {
+        const pp = prev[p.id];
+        if (!pp || !p.alive) return { ix: p.x, iy: p.y };
+        // Only interpolate if moved by 1 cell (normal movement), not teleported
+        const dx = Math.abs(p.x - pp.x), dy = Math.abs(p.y - pp.y);
+        if (dx > 1 || dy > 1) return { ix: p.x, iy: p.y };
+        return {
+          ix: pp.x + (p.x - pp.x) * t_lerp,
+          iy: pp.y + (p.y - pp.y) * t_lerp,
+        };
+      };
+
+      const me = gs.players?.find(p => p.id === myIdRef.current);
+      const meInterp = me ? getInterp(me) : null;
+
+      const camX = meInterp ? meInterp.ix : GRID_SIZE / 2;
+      const camY = meInterp ? meInterp.iy : GRID_SIZE / 2;
       const viewCells = 30;
       const cellSize  = Math.max(w, h) / viewCells;
       const ox = w / 2 - camX * cellSize;
@@ -132,13 +192,14 @@ const GameCanvas = memo(({
         });
       }
 
-      // Players
+      // Players (interpolated)
       if (gs.players) {
         gs.players.forEach(p => {
           if (!p.alive) return;
           const color = PLAYER_COLORS[p.colorIndex] || '#ffffff';
-          const px = p.x * cellSize + ox;
-          const py = p.y * cellSize + oy;
+          const { ix, iy } = getInterp(p);
+          const px = ix * cellSize + ox;
+          const py = iy * cellSize + oy;
           const s = cellSize;
 
           if (p.id === myIdRef.current) { ctx.shadowColor = color; ctx.shadowBlur = 12; }
@@ -184,9 +245,10 @@ const GameCanvas = memo(({
       if (gs.players) {
         gs.players.forEach(p => {
           if (!p.alive) return;
+          const { ix, iy } = getInterp(p);
           ctx.fillStyle = p.id === myIdRef.current ? '#ffffff' : (PLAYER_COLORS[p.colorIndex] || '#ffffff');
           ctx.beginPath();
-          ctx.arc(mx + p.x * scale, my + p.y * scale, p.id === myIdRef.current ? 3 : 2, 0, Math.PI * 2);
+          ctx.arc(mx + ix * scale, my + iy * scale, p.id === myIdRef.current ? 3 : 2, 0, Math.PI * 2);
           ctx.fill();
         });
       }

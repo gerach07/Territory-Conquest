@@ -519,9 +519,12 @@ class Room {
       const p = this.players[pid];
       if (!p) continue;
       players[pid] = {
-        x: p.x, y: p.y, direction: p.direction, trail: p.trail,
-        alive: p.alive, color: p.color, colorIndex: p.colorIndex,
-        name: p.name, score: p.score, kills: p.kills, playerIndex: p.playerIndex,
+        x: p.x, y: p.y, d: p.direction,
+        t: p.trail.length > 0 ? p.trail.map(pt => [pt.x, pt.y]) : [],
+        a: p.alive ? 1 : 0,
+        s: p.score, k: p.kills,
+        // Static fields needed for first render / reconnection
+        name: p.name, colorIndex: p.colorIndex, playerIndex: p.playerIndex,
         forfeited: p.forfeited || false,
       };
     }

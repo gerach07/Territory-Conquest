@@ -8,6 +8,7 @@ import './App.css';
 import useSocket from './hooks/useSocket';
 import { useI18n } from './i18n/I18nContext';
 import { buildWaitingData, processGameState, formatUptime, getRoomFromURL, setURLRoom } from './utils/gameHelpers';
+import { TICK_MS } from './constants';
 import { playSound, setSoundEnabled } from './utils/sounds';
 import { playPhaseMusic } from './utils/music';
 
@@ -118,6 +119,10 @@ function App() {
   const socketRef   = useRef(null);
   const gameStateRef = useRef(null);
   const killFeedId   = useRef(0);
+
+  // Interpolation: store previous player positions + tick timestamp
+  const prevPlayersRef = useRef(null);   // positions at tick N-1
+  const tickTimeRef    = useRef(0);      // when tick N arrived (performance.now())
 
   // Keep refs in sync
   useEffect(() => { socketRef.current = socket; }, [socket]);
@@ -270,7 +275,16 @@ function App() {
     };
 
     const onGameState = (state) => {
-      const gs = processGameState(state, null, gameStateRef.current?.grid);
+      // Snapshot previous positions for interpolation
+      const prevGs = gameStateRef.current;
+      if (prevGs?.players) {
+        const snap = {};
+        prevGs.players.forEach(p => { snap[p.id] = { x: p.x, y: p.y }; });
+        prevPlayersRef.current = snap;
+      }
+      tickTimeRef.current = performance.now();
+
+      const gs = processGameState(state, null, prevGs?.grid);
       setGameState(gs);
 
       if (state.timeRemaining !== undefined) {
@@ -489,6 +503,25 @@ function App() {
   /* ── Game actions ── */
   const handleDirectionChange = useCallback((dir) => {
     socketRef.current?.emit('changeDirection', { direction: dir });
+
+    // Client-side prediction: immediately update own player direction + position
+    const gs = gameStateRef.current;
+    if (!gs?.players) return;
+    const meIdx = gs.players.findIndex(p => p.id === socketRef.current?.id);
+    if (meIdx === -1) return;
+    const me = gs.players[meIdx];
+    if (!me.alive) return;
+
+    const opposites = { up: 'down', down: 'up', left: 'right', right: 'left' };
+    if (opposites[me.direction] === dir) return; // server would reject this
+
+    const dirs = { up: { dx: 0, dy: -1 }, down: { dx: 0, dy: 1 }, left: { dx: -1, dy: 0 }, right: { dx: 1, dy: 0 } };
+    const d = dirs[dir];
+    if (!d) return;
+
+    const updated = [...gs.players];
+    updated[meIdx] = { ...me, direction: dir };
+    setGameState({ ...gs, players: updated });
   }, []);
 
   const handleSurrender = useCallback(() => {
@@ -649,6 +682,8 @@ function App() {
             timeRemaining={timeRemaining}
             killFeed={killFeed}
             lightTheme={lightTheme}
+            prevPlayers={prevPlayersRef}
+            tickTime={tickTimeRef}
           />
         )}
 

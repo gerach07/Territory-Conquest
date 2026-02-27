@@ -3,6 +3,8 @@
    ═══════════════════════════════════════════════════════════ */
 
 export const GRID_SIZE = 80;
+export const TICK_RATE = 10;
+export const TICK_MS   = 1000 / TICK_RATE;
 
 export const PLAYER_COLORS = [
   '#ef4444', '#3b82f6', '#22c55e', '#eab308', '#a855f7', '#06b6d4'

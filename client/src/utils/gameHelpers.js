@@ -82,7 +82,7 @@ export function setURLRoom(roomCode, password = null) {
 export function processGameState(state, flatGrid, prevGrid) {
   const result = { players: [], grid: prevGrid || null };
 
-  // Convert players object → array
+  // Convert players object → array (supports both compact and legacy formats)
   if (state.players) {
     if (Array.isArray(state.players)) {
       result.players = state.players;
@@ -92,15 +92,17 @@ export function processGameState(state, flatGrid, prevGrid) {
         name:        p.name,
         x:           p.x,
         y:           p.y,
-        direction:   p.direction,
-        trail:       p.trail ? p.trail.map((t) => [t.x, t.y]) : [],
-        alive:       p.alive,
+        direction:   p.d || p.direction,
+        trail:       p.t ? p.t.map(pt => Array.isArray(pt) ? pt : [pt.x, pt.y])
+                         : (p.trail ? p.trail.map(pt => [pt.x, pt.y]) : []),
+        alive:       p.a !== undefined ? !!p.a : p.alive,
         color:       p.color,
         colorIndex:  p.colorIndex,
-        score:       p.score,
-        kills:       p.kills,
+        score:       p.s !== undefined ? p.s : p.score,
+        kills:       p.k !== undefined ? p.k : p.kills,
         playerIndex: p.playerIndex,
         spectator:   false,
+        forfeited:   p.forfeited || false,
       }));
     }
   }
