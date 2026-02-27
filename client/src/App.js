@@ -295,6 +295,7 @@ function App() {
       }
       if (data.state === 'playing' && data.gameState) {
         const gs = processGameState(data.gameState, data.grid, null);
+        gameStateRef.current = gs;
         setGameState(gs);
         setPhase('game');
         showToast(t('msg.spectating', data.roomId), '👁️');
@@ -335,6 +336,7 @@ function App() {
 
     const onGameStarted = (data) => {
       const gs = processGameState(data.gameState, data.grid, null);
+      gameStateRef.current = gs; // sync ref immediately (before React render)
       setGameState(gs);
       setGameTimeLimit(data.timeLimit || 180);
       setPhase('game');
@@ -355,6 +357,11 @@ function App() {
       tickTimeRef.current = performance.now();
 
       const gs = processGameState(state, null, prevGs?.grid);
+      // CRITICAL: update ref synchronously so the *next* event in the same
+      // microtask batch sees the correct previous grid.  Without this,
+      // bundled network events all read the same stale grid and gridChanges
+      // from earlier ticks are silently lost.
+      gameStateRef.current = gs;
       setGameState(gs);
 
       if (state.timeRemaining !== undefined) {
@@ -426,6 +433,7 @@ function App() {
     };
 
     const onGameReset = (data) => {
+      gameStateRef.current = null;
       setGameState(null);
       setGameOverData(null);
       setIsDead(false);
@@ -542,6 +550,7 @@ function App() {
     setRoomPassword(null);
     setIsHost(false);
     setIsSpectator(false);
+    gameStateRef.current = null;
     setGameState(null);
     setGameOverData(null);
     setIsDead(false);
@@ -656,7 +665,9 @@ function App() {
 
     const updated = [...gs.players];
     updated[meIdx] = { ...me, direction: dir };
-    setGameState({ ...gs, players: updated });
+    const newGs = { ...gs, players: updated };
+    gameStateRef.current = newGs;
+    setGameState(newGs);
   }, []);
 
   const handleLeaveGame = useCallback(() => {
