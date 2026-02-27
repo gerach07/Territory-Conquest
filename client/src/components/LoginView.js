@@ -9,7 +9,7 @@ import { PLAYER_COLORS, COLOR_NAMES } from '../constants';
 
 const LoginView = memo(({
   loginView, setLoginView,
-  onCreateRoom, onJoinRoom, onSpectate, onFinalJoin,
+  onJoinRoom, onSpectate, onFinalJoin,
   pendingJoin, setPendingJoin,
   takenColors,
   serverUrl,
@@ -29,6 +29,7 @@ const LoginView = memo(({
   const [roomsLoading, setRoomsLoading] = useState(false);
   const [selectedRoom, setSelectedRoom] = useState(null);
   const [isCheckingRoom, setIsCheckingRoom] = useState(false);
+  const [pinError, setPinError]             = useState('');
 
   /* ── restore saved name ── */
   useEffect(() => {
@@ -36,13 +37,14 @@ const LoginView = memo(({
     if (saved) setPlayerName(saved);
   }, []);
 
-  /* ── auto-select available color ── */
+  /* ── auto-select available color (only when joining, not creating) ── */
   useEffect(() => {
+    if (pendingJoin?.creating) return; // Don't auto-switch when creating a new room
     if (takenColors && takenColors.includes(selectedColor)) {
       const avail = PLAYER_COLORS.findIndex((_, i) => !takenColors.includes(i));
       if (avail >= 0) setSelectedColor(avail);
     }
-  }, [takenColors, selectedColor]);
+  }, [takenColors, selectedColor, pendingJoin]);
 
   /* ── fetch rooms list ── */
   const fetchRooms = useCallback(async () => {
@@ -72,9 +74,29 @@ const LoginView = memo(({
     setTimeout(() => setIsCheckingRoom(false), 2000);
   };
 
-  const handlePinSubmit = () => {
+  const handlePinSubmit = async () => {
     if (pin.length !== 3) return;
     if (!pendingJoin) return;
+    setPinError('');
+
+    // Validate PIN with server before proceeding
+    if (serverUrl && pendingJoin.roomCode) {
+      try {
+        const res = await fetch(`${serverUrl}/rooms/${pendingJoin.roomCode}/check-password`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pin }),
+        });
+        const data = await res.json();
+        if (!data.valid) {
+          setPinError(t('login.wrongPin') || 'Incorrect PIN');
+          return;
+        }
+      } catch {
+        // If server unreachable, let it through and let the socket handler deal with it
+      }
+    }
+
     const updated = { ...pendingJoin, pin };
     setPendingJoin(updated);
     if (updated.spectate) {
@@ -174,6 +196,7 @@ const LoginView = memo(({
                 onChange={e => setCreatePin(e.target.value.replace(/\D/g, '').slice(0, 3))}
                 maxLength={3}
                 placeholder="• • •"
+                aria-label={t('login.pinOptional')}
                 className="w-full px-4 py-3 bg-slate-800/80 border border-slate-600/60 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 font-mono tracking-[0.5em] text-center text-2xl transition-all"
               />
               <p className="text-[0.65rem] text-slate-500">{t('login.pinHint')}</p>
@@ -187,13 +210,20 @@ const LoginView = memo(({
               <div className="flex items-center gap-3">
                 <input
                   type="range"
-                  min={1}
+                  min={0}
                   max={10}
-                  value={Math.round(timeLimit / 60)}
-                  onChange={e => setTimeLimit(parseInt(e.target.value) * 60)}
+                  value={timeLimit === 0 ? 0 : Math.round(timeLimit / 60)}
+                  onChange={e => {
+                    const v = parseInt(e.target.value);
+                    setTimeLimit(v === 0 ? 0 : v * 60);
+                  }}
                   className="flex-1 accent-emerald-500 h-2"
                 />
-                <span className="text-lg font-mono font-bold text-emerald-300 w-16 text-center bg-emerald-500/10 rounded-lg py-1 border border-emerald-500/20">{Math.round(timeLimit / 60)} min</span>
+                <span className={`text-lg font-mono font-bold w-20 text-center rounded-lg py-1 border ${
+                  timeLimit === 0
+                    ? 'text-purple-300 bg-purple-500/10 border-purple-500/20'
+                    : 'text-emerald-300 bg-emerald-500/10 border-emerald-500/20'
+                }`}>{timeLimit === 0 ? t('login.noLimit') : `${Math.round(timeLimit / 60)} min`}</span>
               </div>
               <p className="text-[0.65rem] text-slate-500">{t('login.timeLimitHint')}</p>
             </div>
@@ -311,6 +341,7 @@ const LoginView = memo(({
                             maxLength={3}
                             placeholder={t('login.3digitPin') || '3-digit PIN'}
                             autoFocus
+                            aria-label={t('login.3digitPin') || '3-digit PIN'}
                             className="w-full px-3 py-2 bg-slate-800/80 border border-slate-600/60 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 font-mono tracking-[0.3em] text-center text-sm"
                           />
                         )}
@@ -393,7 +424,7 @@ const LoginView = memo(({
                 type="text"
                 inputMode="numeric"
                 value={pin}
-                onChange={e => setPin(e.target.value.replace(/\D/g, '').slice(0, 3))}
+                onChange={e => { setPin(e.target.value.replace(/\D/g, '').slice(0, 3)); setPinError(''); }}
                 onKeyDown={e => { if (e.key === 'Enter' && pin.length === 3) handlePinSubmit(); }}
                 maxLength={3}
                 autoFocus
@@ -415,6 +446,11 @@ const LoginView = memo(({
                 />
               ))}
             </div>
+
+            {/* PIN error */}
+            {pinError && (
+              <p className="text-center text-red-400 text-xs font-semibold animate-fade-in">{pinError}</p>
+            )}
           </div>
 
           <button
@@ -476,10 +512,13 @@ const LoginView = memo(({
               </label>
               <div className="flex gap-2 flex-wrap">
                 {PLAYER_COLORS.map((color, i) => {
-                  const taken = takenColors?.includes(i);
+                  // When creating a new room, no colors are taken yet
+                  const taken = pendingJoin?.creating ? false : takenColors?.includes(i);
                   return (
                     <button key={i} onClick={() => !taken && setSelectedColor(i)}
                       title={COLOR_NAMES[i]}
+                      aria-label={taken ? `${COLOR_NAMES[i]} (taken)` : `Select ${COLOR_NAMES[i]}`}
+                      aria-pressed={i === selectedColor}
                       className={`w-9 h-9 rounded-full border-2 transition-all ${
                         i === selectedColor ? 'border-white scale-110 shadow-lg ring-2 ring-white/20' :
                         taken ? 'border-slate-600 opacity-30 cursor-not-allowed' :

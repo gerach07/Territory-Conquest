@@ -32,6 +32,7 @@
   "login.creatingRoom": "Создание комнаты",
   "login.roomPin": "PIN комнаты",
   "login.pinEnter": "Введи 3-значный PIN, чтобы продолжить",
+  "login.wrongPin": "Неверный PIN. Попробуй снова.",
   "login.continue": "🔓 Продолжить",
   "login.back": "← Назад",
   "login.yourNickname": "Твой никнейм",
@@ -80,8 +81,11 @@
   "game.eliminated": "уничтожил",
   "game.surrender": "Сдаться",
   "game.surrenderConfirm": "Ты уверен, что хочешь сдаться? Ты проиграешь.",
-  "game.forfeited": "{0} сдался!",
+  "game.leaveGame": "Выйти из игры",
+  "game.leaveConfirm": "Ты уверен, что хочешь выйти? Твоя территория будет потеряна.",
+  "game.forfeited": "{0} вышел из игры!",
   "game.surrendered": "сдался",
+  "game.leftGame": "вышел из игры",
 
   "chat.title": "💬 Чат",
   "chat.placeholder": "Напиши сообщение...",
@@ -101,9 +105,16 @@
   "gameover.accept": "✅ Принять",
   "gameover.decline": "❌ Отклонить",
   "gameover.defeat": "Поражение!",
+  "gameover.rematchStatus": "Голосование за реванш",
+  "gameover.playerLeft": "{0} вышел из игры",
+  "gameover.status.voted": "Хочет реванш",
+  "gameover.status.declined": "Отказался",
+  "gameover.status.waiting": "Думает...",
+  "gameover.status.left": "Вышел",
 
   "login.timeLimit": "Ограничение времени",
-  "login.timeLimitHint": "Выбери длительность игры (60-600 секунд)",
+  "login.timeLimitHint": "Поставь 0 для игры без ограничений, или 1-10 минут",
+  "login.noLimit": "Без лимита",
 
   "waiting.kickTitle": "Выгнать игрока",
 

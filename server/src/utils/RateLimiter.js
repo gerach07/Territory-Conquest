@@ -31,8 +31,13 @@ class RateLimiter {
       this.tracker.set(key, entry);
     }
 
-    // Remove timestamps outside the window
-    entry.ts = entry.ts.filter(t => now - t < this.windowMs);
+    // Remove timestamps outside the window (in-place, no allocation)
+    const cutoff = now - this.windowMs;
+    let writeIdx = 0;
+    for (let i = 0; i < entry.ts.length; i++) {
+      if (entry.ts[i] >= cutoff) entry.ts[writeIdx++] = entry.ts[i];
+    }
+    entry.ts.length = writeIdx;
 
     // Check if over limit
     if (entry.ts.length >= this.maxRequests) {
@@ -56,8 +61,13 @@ class RateLimiter {
    */
   cleanup() {
     const now = Date.now();
+    const cutoff = now - this.windowMs;
     for (const [key, entry] of this.tracker) {
-      entry.ts = entry.ts.filter(t => now - t < this.windowMs);
+      let writeIdx = 0;
+      for (let i = 0; i < entry.ts.length; i++) {
+        if (entry.ts[i] >= cutoff) entry.ts[writeIdx++] = entry.ts[i];
+      }
+      entry.ts.length = writeIdx;
       if (entry.ts.length === 0) {
         this.tracker.delete(key);
       }

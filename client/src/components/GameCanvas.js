@@ -2,14 +2,41 @@
    Territory Conquest – GameCanvas (React)
    Full-screen canvas rendering, minimap, leaderboard, input
    ═══════════════════════════════════════════════════════════ */
-import React, { useRef, useEffect, useCallback, memo } from 'react';
+import React, { useRef, useEffect, useCallback, memo, useState, useMemo } from 'react';
 import { GRID_SIZE, PLAYER_COLORS, TICK_MS } from '../constants';
 import { useI18n } from '../i18n/I18nContext';
-import { escapeHtml } from '../utils/gameHelpers';
+
+// Must match server RESPAWN_DELAY_MS (3000) / 1000
+const RESPAWN_SECONDS = 3;
+
+/* ── Death overlay with countdown ── */
+function DeathOverlay({ deathTime, t }) {
+  const [countdown, setCountdown] = useState(RESPAWN_SECONDS);
+  useEffect(() => {
+    if (!deathTime) return;
+    const update = () => {
+      const elapsed = (Date.now() - deathTime) / 1000;
+      setCountdown(Math.max(0, Math.ceil(RESPAWN_SECONDS - elapsed)));
+    };
+    update();
+    const id = setInterval(update, 100);
+    return () => clearInterval(id);
+  }, [deathTime]);
+  return (
+    <div className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm flex items-center justify-center pointer-events-none">
+      <div className="text-center animate-fade-in">
+        <div className="text-6xl mb-3">{t('game.youDied')}</div>
+        <p className="text-slate-400 text-sm">
+          {t('game.respawning')} <span className="text-white font-bold ml-1">{countdown}s</span>
+        </p>
+      </div>
+    </div>
+  );
+}
 
 const GameCanvas = memo(({
-  gameState, myId, isSpectator, isDead,
-  onDirectionChange, onSurrender,
+  gameState, myId, isSpectator, isDead, deathTime,
+  onDirectionChange, onLeaveGame,
   timeRemaining, killFeed,
   lightTheme,
   prevPlayers, tickTime,
@@ -22,10 +49,13 @@ const GameCanvas = memo(({
   const prevPlayersRef = useRef(null);
   const tickTimeRef    = useRef(0);
 
+  // Cache canvas 2D context
+  const ctxRef = useRef(null);
+
   // Keep refs current
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
   useEffect(() => { myIdRef.current = myId; }, [myId]);
-  useEffect(() => { prevPlayersRef.current = prevPlayers?.current; tickTimeRef.current = tickTime?.current; }, [prevPlayers, tickTime, gameState]);
+  useEffect(() => { prevPlayersRef.current = prevPlayers?.current; tickTimeRef.current = tickTime?.current; }, [prevPlayers, tickTime]);
 
   /* ── Keyboard input ── */
   useEffect(() => {
@@ -54,7 +84,7 @@ const GameCanvas = memo(({
   /* ── Touch / swipe input (mobile) ── */
   useEffect(() => {
     let startX = 0, startY = 0;
-    const MIN_SWIPE = 20; // min px distance to register swipe
+    const MIN_SWIPE = 35; // min px distance to register swipe (increased from 20)
 
     const onTouchStart = (e) => {
       const touch = e.touches[0];
@@ -76,6 +106,8 @@ const GameCanvas = memo(({
         dir = dy > 0 ? 'down' : 'up';
       }
       onDirectionChange(dir);
+      // Haptic feedback on mobile if available
+      if (navigator.vibrate) navigator.vibrate(10);
     };
 
     window.addEventListener('touchstart', onTouchStart, { passive: true });
@@ -104,7 +136,8 @@ const GameCanvas = memo(({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    if (!ctxRef.current) ctxRef.current = canvas.getContext('2d');
+    const ctx = ctxRef.current;
 
     const render = () => {
       const gs = gameStateRef.current;
@@ -167,8 +200,10 @@ const GameCanvas = memo(({
       if (gs.grid) {
         const colorMap = gs.playerColorMap || {};
         for (let y = startRow; y < Math.min(gs.grid.length, endRow); y++) {
-          for (let x = startCol; x < Math.min(gs.grid[y]?.length || 0, endCol); x++) {
-            const owner = gs.grid[y][x];
+          const row = gs.grid[y];
+          if (!row) continue;
+          for (let x = startCol; x < Math.min(row.length, endCol); x++) {
+            const owner = row[x];
             if (owner > 0) {
               const cIdx = colorMap[owner];
               if (cIdx !== undefined && cIdx < PLAYER_COLORS.length) {
@@ -227,11 +262,15 @@ const GameCanvas = memo(({
       ctx.lineWidth = 1;
       ctx.strokeRect(mx, my, mmSize, mmSize);
       const scale = mmSize / GRID_SIZE;
+
+      // Draw minimap territory directly (no caching - simpler and works)
       if (gs.grid) {
         const colorMap = gs.playerColorMap || {};
         for (let y = 0; y < gs.grid.length; y += 2) {
-          for (let x = 0; x < (gs.grid[y]?.length || 0); x += 2) {
-            const owner = gs.grid[y][x];
+          const row = gs.grid[y];
+          if (!row) continue;
+          for (let x = 0; x < row.length; x += 2) {
+            const owner = row[x];
             if (owner > 0) {
               const cIdx = colorMap[owner];
               if (cIdx !== undefined && cIdx < PLAYER_COLORS.length) {
@@ -242,6 +281,8 @@ const GameCanvas = memo(({
           }
         }
       }
+
+      // Draw player positions on top
       if (gs.players) {
         gs.players.forEach(p => {
           if (!p.alive) return;
@@ -260,10 +301,13 @@ const GameCanvas = memo(({
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
   }, [lightTheme]);
 
-  /* ── Leaderboard data ── */
-  const sorted = (gameState?.players || [])
-    .filter(p => !p.spectator)
-    .sort((a, b) => (b.score || 0) - (a.score || 0));
+  /* ── Leaderboard data (memoized to avoid re-sorting every frame) ── */
+  const sorted = useMemo(() => 
+    (gameState?.players || [])
+      .filter(p => !p.spectator)
+      .sort((a, b) => (b.score || 0) - (a.score || 0)),
+    [gameState?.players]
+  );
 
   return (
     <div className="fixed inset-0 z-0">
@@ -300,7 +344,7 @@ const GameCanvas = memo(({
       </div>
 
       {/* ── Kill feed ── */}
-      <div className="fixed top-24 left-1/2 -translate-x-1/2 z-20 space-y-1 w-72 pointer-events-none">
+      <div className="fixed top-24 left-1/2 -translate-x-1/2 z-20 space-y-1 w-72 pointer-events-none" aria-live="polite" aria-atomic="false">
         {(killFeed || []).map((kf, i) => (
           <div key={kf.id || i} className="text-center text-xs py-1 px-3 rounded-lg bg-black/50 backdrop-blur-sm text-slate-300 animate-fade-in">
             <span className="text-red-400 font-bold">{kf.killer}</span>
@@ -312,19 +356,15 @@ const GameCanvas = memo(({
 
       {/* ── Death overlay ── */}
       {isDead && (
-        <div className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm flex items-center justify-center pointer-events-none">
-          <div className="text-center animate-fade-in">
-            <div className="text-6xl mb-3">{t('game.youDied')}</div>
-            <p className="text-slate-400 text-sm">{t('game.respawning')}</p>
-          </div>
-        </div>
+        <DeathOverlay deathTime={deathTime} t={t} />
       )}
 
-      {/* ── Surrender button ── */}
-      {!isSpectator && !isDead && (
-        <button onClick={onSurrender}
+      {/* ── Leave Game button ── */}
+      {!isSpectator && (
+        <button onClick={onLeaveGame}
+          aria-label={t('game.leaveGame')}
           className="fixed bottom-4 left-4 z-20 px-3 py-2 rounded-xl bg-red-900/40 hover:bg-red-800/50 border border-red-500/20 text-red-400 text-xs font-medium transition-all backdrop-blur-sm">
-          🏳️ {t('game.surrender')}
+          🚪 {t('game.leaveGame')}
         </button>
       )}
     </div>

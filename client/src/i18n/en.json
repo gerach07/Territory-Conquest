@@ -32,6 +32,7 @@
   "login.creatingRoom": "Creating Room",
   "login.roomPin": "Room PIN",
   "login.pinEnter": "Enter the 3-digit PIN to continue",
+  "login.wrongPin": "Incorrect PIN. Try again.",
   "login.continue": "🔓 Continue",
   "login.back": "← Back",
   "login.yourNickname": "Your Nickname",
@@ -80,8 +81,11 @@
   "game.eliminated": "eliminated",
   "game.surrender": "Surrender",
   "game.surrenderConfirm": "Are you sure you want to surrender? You will lose the game.",
-  "game.forfeited": "{0} has surrendered!",
+  "game.leaveGame": "Leave Game",
+  "game.leaveConfirm": "Are you sure you want to leave? Your territory will be lost.",
+  "game.forfeited": "{0} has left the game!",
   "game.surrendered": "surrendered",
+  "game.leftGame": "left the game",
 
   "chat.title": "💬 Chat",
   "chat.placeholder": "Type a message...",
@@ -101,9 +105,16 @@
   "gameover.accept": "✅ Accept",
   "gameover.decline": "❌ Decline",
   "gameover.defeat": "Defeated!",
+  "gameover.rematchStatus": "Rematch Vote",
+  "gameover.playerLeft": "{0} left the game",
+  "gameover.status.voted": "Wants rematch",
+  "gameover.status.declined": "Declined",
+  "gameover.status.waiting": "Deciding...",
+  "gameover.status.left": "Left",
 
   "login.timeLimit": "Time Limit",
-  "login.timeLimitHint": "Choose how long a game lasts (60-600 seconds)",
+  "login.timeLimitHint": "Slide to 0 for unlimited, or set 1-10 minutes",
+  "login.noLimit": "No limit",
 
   "waiting.kickTitle": "Kick Player",
 

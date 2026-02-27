@@ -6,9 +6,12 @@ import React, { memo } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { PLAYER_COLORS } from '../constants';
 
+// Memoized status icons (created once, not on every render)
+const STATUS_ICONS = { voted: '✅', declined: '❌', waiting: '⏳', left: '👋 ' };
+
 const GameOver = memo(({
   gameOverData, myId, isSpectator,
-  playAgainPending, playAgainVotes,
+  playAgainPending, playAgainStatus,
   handlePlayAgain, handleDeclinePlayAgain, handleBackToMenu,
 }) => {
   const { t } = useI18n();
@@ -88,14 +91,24 @@ const GameOver = memo(({
 
         {/* Actions */}
         {!isSpectator && (
-          <div className="space-y-2 relative">
+          <div className="space-y-3 relative">
+            {/* Player status list when voting is in progress */}
+            {playAgainStatus?.players?.length > 0 && (
+              <PlayerStatusList 
+                players={playAgainStatus.players}
+                myId={myId}
+                votedCount={playAgainStatus.votedCount}
+                totalPlayers={playAgainStatus.totalPlayers}
+              />
+            )}
+
             {playAgainPending && (
               <>
                 <div className="flex justify-center gap-2 mb-2">
                   {[0, 150, 300].map(d => <span key={d} className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: `${d}ms` }} />)}
                 </div>
                 <p className="text-sm text-slate-400 text-center">
-                  {t('gameover.waitingAccept', playAgainVotes || '')}
+                  {t('gameover.waitingAccept', `${playAgainStatus?.votedCount || 0}/${playAgainStatus?.totalPlayers || '?'}`)}
                 </p>
                 <button onClick={handleDeclinePlayAgain}
                   className="w-full py-2.5 rounded-xl bg-slate-700/50 hover:bg-slate-600/50 text-slate-300 font-medium transition-all text-sm">
@@ -129,6 +142,33 @@ const GameOver = memo(({
     </div>
   );
 });
+
+// Memoized player status list component to avoid re-rendering on every status update
+const PlayerStatusList = memo(({ players, myId, votedCount, totalPlayers }) => {
+  const { t } = useI18n();
+  return (
+    <div className="space-y-1.5 mb-3">
+      <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider text-center mb-2">
+        {t('gameover.rematchStatus')} ({votedCount}/{totalPlayers})
+      </p>
+      {players.map(p => {
+        const color = PLAYER_COLORS[p.colorIndex] || '#888';
+        const isSelf = p.id === myId;
+        const icon = STATUS_ICONS[p.status] || '⏳';
+        return (
+          <div key={p.id} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm ${
+            isSelf ? 'bg-cyan-900/20 border border-cyan-500/20' : 'bg-slate-800/30'
+          }`}>
+            <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: color }} />
+            <span className="flex-1 truncate text-slate-300 text-xs">{p.name}</span>
+            <span className="text-sm" title={t(`gameover.status.${p.status}`)}>{icon}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+PlayerStatusList.displayName = 'PlayerStatusList';
 
 GameOver.displayName = 'GameOver';
 export default GameOver;

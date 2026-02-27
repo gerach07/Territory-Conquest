@@ -9,14 +9,21 @@ export function setSoundEnabled(enabled) { _soundEnabled = !!enabled; }
 export function isSoundEnabled()         { return _soundEnabled; }
 
 function getCtx() {
-  if (!ctx) ctx = new AudioCtx();
-  if (ctx.state === 'suspended') ctx.resume();
+  if (!ctx) {
+    try {
+      ctx = new AudioCtx();
+    } catch (e) {
+      return null;
+    }
+  }
+  if (ctx?.state === 'suspended') ctx.resume().catch(() => {});
   return ctx;
 }
 
 function tone(freq, duration, type = 'sine', vol = 0.3) {
+  const c = getCtx();
+  if (!c) return;
   try {
-    const c = getCtx();
     const osc = c.createOscillator();
     const gain = c.createGain();
     osc.type = type; osc.frequency.value = freq;

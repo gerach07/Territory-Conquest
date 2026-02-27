@@ -16,6 +16,16 @@ const ChatBox = memo(({ messages, onSend, isOpen, onToggle, unread, myId }) => {
       listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, isOpen]);
 
+  // Global Escape key to close chat
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleEscape = (e) => {
+      if (e.key === 'Escape') onToggle();
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [isOpen, onToggle]);
+
   const handleSend = useCallback(() => {
     const trimmed = text.trim();
     if (!trimmed) return;
@@ -51,7 +61,7 @@ const ChatBox = memo(({ messages, onSend, isOpen, onToggle, unread, myId }) => {
             )}
             {messages.map((msg, i) => {
               const isMine = msg.playerId === myId;
-              const color  = PLAYER_COLORS[msg.colorIndex] || '#94a3b8';
+              const color  = (msg.colorIndex !== undefined && msg.colorIndex >= 0) ? PLAYER_COLORS[msg.colorIndex] : '#94a3b8';
               return (
                 <div key={msg.id || i} className={msg.system ? 'text-center' : `flex ${isMine ? 'justify-end' : 'justify-start'}`}>
                   {msg.system ? (

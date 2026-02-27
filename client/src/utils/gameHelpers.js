@@ -4,14 +4,6 @@
 import { GRID_SIZE } from '../constants';
 
 /**
- * Escape HTML special characters.
- */
-export function escapeHtml(str) {
-  if (!str) return '';
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-/**
  * Format seconds → human-readable uptime.
  */
 export function formatUptime(seconds) {
@@ -118,22 +110,31 @@ export function processGameState(state, flatGrid, prevGrid) {
     }
   }
 
-  // Apply incremental grid changes
+  // Apply incremental grid changes (clone affected rows for React immutability)
   if (state.gridChanges && result.grid) {
+    const clonedRows = new Set();
     state.gridChanges.forEach((change) => {
       if (change.y >= 0 && change.y < GRID_SIZE && change.x >= 0 && change.x < GRID_SIZE) {
+        if (!clonedRows.has(change.y)) {
+          result.grid[change.y] = [...result.grid[change.y]];
+          clonedRows.add(change.y);
+        }
         result.grid[change.y][change.x] = change.owner;
       }
     });
   }
 
-  // Player index → color index map for grid rendering
-  result.playerColorMap = {};
-  result.players.forEach((p) => {
-    if (p.playerIndex !== undefined) {
-      result.playerColorMap[p.playerIndex] = p.colorIndex;
-    }
-  });
+  // Player index → color index map for grid rendering (reuse from prev if unchanged)
+  if (prevGrid?.playerColorMap && prevGrid.players === result.players) {
+    result.playerColorMap = prevGrid.playerColorMap;
+  } else {
+    result.playerColorMap = {};
+    result.players.forEach((p) => {
+      if (p.playerIndex !== undefined) {
+        result.playerColorMap[p.playerIndex] = p.colorIndex;
+      }
+    });
+  }
 
   return result;
 }

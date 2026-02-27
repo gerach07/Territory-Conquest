@@ -32,6 +32,7 @@
   "login.creatingRoom": "Veido istabu",
   "login.roomPin": "Istabas PIN",
   "login.pinEnter": "Ievadi 3 ciparu PIN, lai turpinātu",
+  "login.wrongPin": "Nepareizs PIN. Mēģini vēlreiz.",
   "login.continue": "🔓 Turpināt",
   "login.back": "← Atpakaļ",
   "login.yourNickname": "Tavs segvārds",
@@ -80,8 +81,11 @@
   "game.eliminated": "likvidēja",
   "game.surrender": "Padoties",
   "game.surrenderConfirm": "Vai tiešām vēlies padoties? Tu zaudēsi spēli.",
-  "game.forfeited": "{0} padevās!",
+  "game.leaveGame": "Pamest spēli",
+  "game.leaveConfirm": "Vai tiešām vēlies aiziet? Tava teritorija tiks zaudēta.",
+  "game.forfeited": "{0} pameta spēli!",
   "game.surrendered": "padevās",
+  "game.leftGame": "pameta spēli",
 
   "chat.title": "💬 Čats",
   "chat.placeholder": "Raksti ziņu...",
@@ -101,9 +105,16 @@
   "gameover.accept": "✅ Pieņemt",
   "gameover.decline": "❌ Noraidīt",
   "gameover.defeat": "Sakāve!",
+  "gameover.rematchStatus": "Revanša balsojums",
+  "gameover.playerLeft": "{0} aizgāja",
+  "gameover.status.voted": "Vēlas revanšu",
+  "gameover.status.declined": "Atteicās",
+  "gameover.status.waiting": "Domā...",
+  "gameover.status.left": "Aizgāja",
 
   "login.timeLimit": "Laika limits",
-  "login.timeLimitHint": "Izvēlies, cik ilgi ilgst spēle (60-600 sekundes)",
+  "login.timeLimitHint": "Pabīdi uz 0 lai nav laika limita, vai iestati 1-10 minūtes",
+  "login.noLimit": "Bez limita",
 
   "waiting.kickTitle": "Izmest spēlētāju",
 

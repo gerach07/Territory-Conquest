@@ -5,7 +5,6 @@ let _audio = null;
 let _currentPhase = null;
 let _enabled = false;
 let _volume = 0.35;
-let _paused = false;
 let _fadeInterval = null;
 
 const TRACKS = {
@@ -68,12 +67,16 @@ export function playPhaseMusic(phase) {
         clearInterval(rampId);
       }
     }, rampStep);
-  }).catch(() => {});
+  }).catch(() => {
+    // Audio play failed (user gesture required) - clean up orphan element
+    audio.remove();
+    _audio = null;
+  });
   _audio = audio;
 }
 
 export function stopAllMusic()                  { _currentPhase = null; stopMusic(false); }
 export function setMusicEnabled(enabled)        { _enabled = enabled; if (!enabled) stopMusic(false); else if (_currentPhase) playPhaseMusic(_currentPhase); }
 export function isMusicEnabled()                { return _enabled; }
-export function pauseMusic()                    { _paused = true; if (_audio) _audio.pause(); }
-export function resumeMusic()                   { _paused = false; if (_enabled && _audio) _audio.play().catch(() => {}); }
+export function pauseMusic()                    { if (_audio) _audio.pause(); }
+export function resumeMusic()                   { if (_enabled && _audio) _audio.play().catch(() => {}); }

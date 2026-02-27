@@ -9,7 +9,6 @@ import './App.css';
 import useSocket from './hooks/useSocket';
 import { useI18n } from './i18n/I18nContext';
 import { buildWaitingData, processGameState, formatUptime, getRoomFromURL, setURLRoom } from './utils/gameHelpers';
-import { TICK_MS } from './constants';
 import { playSound, setSoundEnabled } from './utils/sounds';
 import { playPhaseMusic } from './utils/music';
 
@@ -88,6 +87,7 @@ function App() {
   const [isSpectator,  setIsSpectator]  = useState(false);
   const [gameTimeLimit, setGameTimeLimit] = useState(null);
   const [pendingJoin,  setPendingJoin]  = useState(null);
+  const [playerNameDisplay, setPlayerNameDisplay] = useState(() => localStorage.getItem('tc_playerName') || '');
 
   /* ── Waiting room players ── */
   const [waitingPlayers, setWaitingPlayers] = useState([]);
@@ -96,13 +96,14 @@ function App() {
   /* ── Game state ── */
   const [gameState,      setGameState]      = useState(null);
   const [isDead,         setIsDead]         = useState(false);
+  const [deathTime,      setDeathTime]      = useState(null);
   const [timeRemaining,  setTimeRemaining]  = useState(null);
   const [killFeed,       setKillFeed]       = useState([]);
 
   /* ── Game over ── */
   const [gameOverData,     setGameOverData]     = useState(null);
   const [playAgainPending, setPlayAgainPending] = useState(false);
-  const [playAgainVotes,   setPlayAgainVotes]   = useState('');
+  const [playAgainStatus,  setPlayAgainStatus]  = useState(null); // { players: [{id, name, colorIndex, status}], votedCount, totalPlayers }
 
   /* ── Chat ── */
   const [chatMessages, setChatMessages] = useState([]);
@@ -121,6 +122,11 @@ function App() {
   const socketRef   = useRef(null);
   const gameStateRef = useRef(null);
   const killFeedId   = useRef(0);
+  const roomCodeRef     = useRef(null);
+  const gameTimeLimitRef = useRef(null);
+  const phaseRef        = useRef('login');
+  const chatOpenRef     = useRef(false);
+  const roomPasswordRef = useRef(null);
 
   // Interpolation: store previous player positions + tick timestamp
   const prevPlayersRef = useRef(null);   // positions at tick N-1
@@ -129,6 +135,20 @@ function App() {
   // Keep refs in sync
   useEffect(() => { socketRef.current = socket; }, [socket]);
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
+  useEffect(() => { roomCodeRef.current = roomCode; }, [roomCode]);
+  useEffect(() => { gameTimeLimitRef.current = gameTimeLimit; }, [gameTimeLimit]);
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+  useEffect(() => { chatOpenRef.current = chatOpen; }, [chatOpen]);
+  useEffect(() => { roomPasswordRef.current = roomPassword; }, [roomPassword]);
+
+  /* ── Kill feed cleanup interval (removes entries older than 5s) ── */
+  useEffect(() => {
+    const killFeedCleanup = setInterval(() => {
+      const now = Date.now();
+      setKillFeed(prev => prev.filter(kf => now - kf.timestamp < 5000));
+    }, 1000);
+    return () => clearInterval(killFeedCleanup);
+  }, []);
 
   /* ── Theme ── */
   useEffect(() => {
@@ -156,9 +176,10 @@ function App() {
     toastTimer.current = setTimeout(() => setToast(null), duration);
   }, []);
 
-  /* ── Server health polling ── */
+  /* ── Server health polling (pauses when tab is hidden) ── */
   useEffect(() => {
     if (!serverUrl) return;
+    let intervalId;
     const poll = async () => {
       try {
         const res = await fetch(`${serverUrl}/health`);
@@ -166,9 +187,12 @@ function App() {
         setServerInfo(data);
       } catch { setServerInfo(null); }
     };
-    poll();
-    const id = setInterval(poll, 15000);
-    return () => clearInterval(id);
+    const startPolling = () => { poll(); intervalId = setInterval(poll, 15000); };
+    const stopPolling = () => { clearInterval(intervalId); };
+    const onVisibility = () => { document.hidden ? stopPolling() : startPolling(); };
+    startPolling();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => { stopPolling(); document.removeEventListener('visibilitychange', onVisibility); };
   }, [serverUrl]);
 
   /* ── URL room code ── */
@@ -184,6 +208,7 @@ function App() {
           setLoginView('menu');
         } else {
           // Room exists – pre-fill join flow
+          if (data.takenColors) setTakenColors(data.takenColors);
           const pin = urlInfo.password || null;
           setPendingJoin({ roomCode: urlInfo.roomCode, pin, spectate: false });
           if (data.hasPassword && !pin) {
@@ -250,19 +275,21 @@ function App() {
     };
 
     const onPlayerJoined = (data) => {
-      const wd = buildWaitingData(data, roomCode, gameTimeLimit);
+      const wd = buildWaitingData(data, roomCodeRef.current, gameTimeLimitRef.current);
       setWaitingPlayers(wd.players);
+      if (data.takenColors) setTakenColors(data.takenColors);
     };
 
     const onPlayerLeft = (data) => {
-      const wd = buildWaitingData(data, roomCode, gameTimeLimit);
+      const wd = buildWaitingData(data, roomCodeRef.current, gameTimeLimitRef.current);
       setWaitingPlayers(wd.players);
       if (data.playerName) showToast(t('msg.leftRoom', data.playerName), '👋', 2500);
     };
 
     const onPlayerKicked = (data) => {
-      const wd = buildWaitingData(data, roomCode, gameTimeLimit);
+      const wd = buildWaitingData(data, roomCodeRef.current, gameTimeLimitRef.current);
       setWaitingPlayers(wd.players);
+      if (data.takenColors) setTakenColors(data.takenColors);
       showToast(t('msg.playerKicked'), '⛔', 2000);
     };
 
@@ -303,15 +330,13 @@ function App() {
             const vName = victim?.name || 'Unknown';
             const kName = killer?.name || (evt.reason === 'boundary' ? 'Border' : 'Themselves');
             setKillFeed(prev => {
-              const newFeed = [...prev, { id: ++killFeedId.current, killer: kName, victim: vName }];
+              const newFeed = [...prev, { id: ++killFeedId.current, killer: kName, victim: vName, timestamp: Date.now() }];
               return newFeed.slice(-5);
             });
-            setTimeout(() => {
-              setKillFeed(prev => prev.filter(kf => kf.id !== killFeedId.current));
-            }, 5000);
 
             if (evt.victim === socket.id) {
               setIsDead(true);
+              setDeathTime(Date.now());
               playSound('death');
             } else {
               playSound('kill');
@@ -319,11 +344,12 @@ function App() {
           }
           if (evt.type === 'respawn' && evt.playerId === socket.id) {
             setIsDead(false);
+            setDeathTime(null);
           }
-          if (evt.type === 'forfeit') {
+          if (evt.type === 'forfeit' || evt.type === 'leave') {
             const fName = evt.playerName || 'Player';
             setKillFeed(prev => {
-              const newFeed = [...prev, { id: ++killFeedId.current, killer: fName, victim: t('game.surrendered') }];
+              const newFeed = [...prev, { id: ++killFeedId.current, killer: fName, victim: t('game.leftGame'), timestamp: Date.now() }];
               return newFeed.slice(-5);
             });
           }
@@ -335,18 +361,26 @@ function App() {
       setGameOverData(data);
       setPhase('gameOver');
       setPlayAgainPending(false);
-      setPlayAgainVotes('');
+      setPlayAgainStatus(null);
       const isWinner = data.winnerId === socket.id;
       playSound(isWinner ? 'victory' : 'defeat');
     };
 
     const onPlayAgainVote = (data) => {
-      showToast(t('gameover.rematchOffer', data.playerName), '🔄', 3000);
-      setPlayAgainVotes(`${data.votes?.length || 0}/${data.totalPlayers || '?'}`);
+      // data: { players: [{id, name, colorIndex, status}], votedCount, totalPlayers, leftPlayer? }
+      setPlayAgainStatus(data);
+      // Show toast for the player who just voted/declined
+      if (data.leftPlayer) {
+        showToast(t('gameover.playerLeft', data.leftPlayer.name), '👋', 3000);
+      }
     };
 
-    const onPlayAgainDeclined = (data) => {
-      showToast(t('msg.playAgainDeclined', data.playerName), '🚫', 3000);
+    const onPlayerDisconnected = (data) => {
+      // During game over, update play-again status when someone leaves
+      if (data.playAgainStatus) {
+        setPlayAgainStatus(data.playAgainStatus);
+        showToast(t('gameover.playerLeft', data.playerName), '👋', 3000);
+      }
     };
 
     const onGameReset = (data) => {
@@ -355,7 +389,7 @@ function App() {
       setIsDead(false);
       setKillFeed([]);
       setIsHost(data.hostId === socket.id);
-      const wd = buildWaitingData(data, roomCode, gameTimeLimit);
+      const wd = buildWaitingData(data, roomCodeRef.current, gameTimeLimitRef.current);
       setWaitingPlayers(wd.players);
       setPhase('waiting');
       showToast(t('msg.newGame'), '🎮');
@@ -366,7 +400,7 @@ function App() {
         const updated = [...prev, msg];
         return updated.slice(-100);
       });
-      if (!chatOpen) setChatUnread(prev => prev + 1);
+      if (!chatOpenRef.current) setChatUnread(prev => prev + 1);
       playSound('chat');
     };
 
@@ -374,6 +408,17 @@ function App() {
     const onKicked     = ()  => { resetToMenu(); showToast(t('msg.kicked'), '⛔'); };
     const onLeftRoom   = ()  => { /* silent */ };
     const onError      = (d) => { showToast(d.error || d.message || 'Error', '❌'); };
+
+    // Reconnection recovery — re-request current room state
+    const onReconnect = () => {
+      const currentPhase = phaseRef.current;
+      const currentRoom = roomCodeRef.current;
+      if (currentRoom && (currentPhase === 'game' || currentPhase === 'waiting')) {
+        const storedName = localStorage.getItem('tc_playerName') || '';
+        const storedPin = roomPasswordRef.current || undefined;
+        socket.emit('rejoinRoom', { gameId: currentRoom, playerName: storedName, password: storedPin });
+      }
+    };
 
     socket.on('connect',          onConnect);
     socket.on('gameJoined',       onGameJoined);
@@ -385,13 +430,14 @@ function App() {
     socket.on('gameState',        onGameState);
     socket.on('gameOver',         onGameOver);
     socket.on('playAgainVote',    onPlayAgainVote);
-    socket.on('playAgainDeclined', onPlayAgainDeclined);
+    socket.on('playerDisconnected', onPlayerDisconnected);
     socket.on('gameReset',        onGameReset);
     socket.on('chatMessage',      onChatMessage);
     socket.on('roomClosed',       onRoomClosed);
     socket.on('kicked',           onKicked);
     socket.on('leftRoom',         onLeftRoom);
     socket.on('error',            onError);
+    socket.io.on('reconnect',     onReconnect);
 
     return () => {
       socket.off('connect',          onConnect);
@@ -404,13 +450,14 @@ function App() {
       socket.off('gameState',        onGameState);
       socket.off('gameOver',         onGameOver);
       socket.off('playAgainVote',    onPlayAgainVote);
-      socket.off('playAgainDeclined', onPlayAgainDeclined);
+      socket.off('playerDisconnected', onPlayerDisconnected);
       socket.off('gameReset',        onGameReset);
       socket.off('chatMessage',      onChatMessage);
       socket.off('roomClosed',       onRoomClosed);
       socket.off('kicked',           onKicked);
       socket.off('leftRoom',         onLeftRoom);
       socket.off('error',            onError);
+      socket.io.off('reconnect',     onReconnect);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socket, showToast, t]);
@@ -447,6 +494,7 @@ function App() {
 
       if (data.hasPassword && !spectate) {
         setPendingJoin(prev => ({ ...prev, roomCode: code, spectate }));
+        if (data.takenColors) setTakenColors(data.takenColors);
         setLoginView('enterPin');
       } else if (spectate) {
         socketRef.current?.emit('joinGame', { gameId: code, isSpectating: true });
@@ -467,6 +515,8 @@ function App() {
 
   const handleFinalJoin = useCallback((name, colorIndex) => {
     if (!pendingJoin) return;
+    // Update display name when player actually joins
+    setPlayerNameDisplay(name);
     if (pendingJoin.creating) {
       const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
       let code = '';
@@ -528,8 +578,8 @@ function App() {
     setGameState({ ...gs, players: updated });
   }, []);
 
-  const handleSurrender = useCallback(() => {
-    if (window.confirm(t('game.surrenderConfirm'))) {
+  const handleLeaveGame = useCallback(() => {
+    if (window.confirm(t('game.leaveConfirm'))) {
       socketRef.current?.emit('forfeit');
     }
   }, [t]);
@@ -557,8 +607,15 @@ function App() {
     });
   }, []);
 
-  /* ── Derived display name (from localStorage) ── */
-  const playerName = localStorage.getItem('tc_playerName') || '';
+  /* ── Close server info dropdown on Escape key ── */
+  useEffect(() => {
+    if (!serverInfoOpen) return;
+    const handler = (e) => {
+      if (e.key === 'Escape') setServerInfoOpen(false);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [serverInfoOpen]);
 
   /* ═══════════════════════════════════════════
      RENDER
@@ -609,8 +666,8 @@ function App() {
               <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
               <span className="hidden sm:inline">{isConnected ? t('app.online') : t('app.offline')}</span>
             </button>
-            {phase !== 'login' && playerName && (
-              <span className="hidden sm:block text-xs font-bold text-slate-300 max-w-[6rem] truncate" title={playerName}>{playerName}</span>
+            {phase !== 'login' && playerNameDisplay && (
+              <span className="hidden sm:block text-xs font-bold text-slate-300 max-w-[6rem] truncate" title={playerNameDisplay}>{playerNameDisplay}</span>
             )}
           </div>
         </div>
@@ -695,7 +752,6 @@ function App() {
           <LoginView
             loginView={loginView}
             setLoginView={setLoginView}
-            onCreateRoom={() => {}}
             onJoinRoom={handleJoinRoom}
             onSpectate={handleSpectate}
             onFinalJoin={handleFinalJoin}
@@ -729,8 +785,9 @@ function App() {
             myId={myId}
             isSpectator={isSpectator}
             isDead={isDead}
+            deathTime={deathTime}
             onDirectionChange={handleDirectionChange}
-            onSurrender={handleSurrender}
+            onLeaveGame={handleLeaveGame}
             timeRemaining={timeRemaining}
             killFeed={killFeed}
             lightTheme={lightTheme}
@@ -746,7 +803,7 @@ function App() {
             myId={myId}
             isSpectator={isSpectator}
             playAgainPending={playAgainPending}
-            playAgainVotes={playAgainVotes}
+            playAgainStatus={playAgainStatus}
             handlePlayAgain={handlePlayAgain}
             handleDeclinePlayAgain={handleDeclinePlayAgain}
             handleBackToMenu={handleBackToMenu}
@@ -768,7 +825,7 @@ function App() {
 
       {/* ── Toast ── */}
       {toast && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-xl glass-card border-slate-600/40 shadow-xl flex items-center gap-2 animate-slide-up"
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-xl glass-card border-slate-600/40 shadow-xl flex items-center gap-2 animate-slide-up"
           onClick={() => setToast(null)}>
           <span className="text-lg">{toast.icon}</span>
           <span className="text-sm text-white font-medium">{toast.msg}</span>

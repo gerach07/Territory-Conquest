@@ -7,10 +7,10 @@
 
 const {
   GRID_SIZE, MAX_PLAYERS_PER_ROOM, MAX_SPECTATORS,
-  RESPAWN_DELAY_MS, START_TERRITORY_SIZE,
+  RESPAWN_DELAY_MS, RECONNECT_GRACE_MS, START_TERRITORY_SIZE,
   PLAYER_COLORS, DIRECTIONS, START_POSITIONS, GameState, VALID_TRANSITIONS,
   RATE_LIMIT_ACTIONS_PER_SECOND, RATE_LIMIT_CHAT_PER_SECOND,
-  MAX_CHAT_LENGTH, DEFAULT_GAME_TIME_SECONDS,
+  MAX_CHAT_LENGTH, MAX_CHAT_HISTORY, DEFAULT_GAME_TIME_SECONDS,
 } = require('../constants');
 const RateLimiter = require('../utils/RateLimiter');
 
@@ -18,11 +18,17 @@ const RateLimiter = require('../utils/RateLimiter');
 // CAPTURE ALGORITHM (Flood Fill)
 // ============================================================================
 
-function captureTerritory(grid, playerId, trail) {
+function captureTerritory(grid, playerId, trail, cellCounts) {
   if (!trail || trail.length === 0) return [];
 
+  // Mark trail cells as player territory, tracking prev owners for cellCounts
   for (const pos of trail) {
+    const prev = grid[pos.y][pos.x];
+    if (prev !== 0 && prev !== playerId && cellCounts && cellCounts[prev] !== undefined) cellCounts[prev]--;
     grid[pos.y][pos.x] = playerId;
+  }
+  if (cellCounts) {
+    cellCounts[playerId] = (cellCounts[playerId] || 0) + trail.length;
   }
 
   let minX = GRID_SIZE, maxX = 0, minY = GRID_SIZE, maxY = 0;
@@ -77,10 +83,16 @@ function captureTerritory(grid, playerId, trail) {
     for (let lx = 0; lx < width; lx++) {
       if (!visited[ly][lx]) {
         const gx = lx + minX, gy = ly + minY;
-        if (grid[gy][gx] !== playerId) { grid[gy][gx] = playerId; captured.push({ x: gx, y: gy }); }
+        if (grid[gy][gx] !== playerId) {
+          const prev = grid[gy][gx];
+          if (prev !== 0 && cellCounts && cellCounts[prev] !== undefined) cellCounts[prev]--;
+          grid[gy][gx] = playerId;
+          captured.push({ x: gx, y: gy });
+        }
       }
     }
   }
+  if (cellCounts) cellCounts[playerId] = (cellCounts[playerId] || 0) + captured.length;
   return captured;
 }
 
@@ -114,6 +126,7 @@ class Room {
 
     // Play-again votes
     this.playAgainVotes = new Set();
+    this.playAgainDeclined = new Set();
 
     // Winner info
     this.winnerId = null;
@@ -182,6 +195,7 @@ class Room {
     if (targetId === kickerId) return { success: false, error: 'Cannot kick yourself' };
     if (!this.players[targetId]) return { success: false, error: 'Player not found' };
     delete this.players[targetId];
+    this.playerOrder = this.playerOrder.filter(id => id !== targetId);
     this.actionLimiter.removeKey(targetId);
     this.chatLimiter.removeKey(targetId);
     return { success: true };
@@ -198,19 +212,20 @@ class Room {
     const player = this.players[playerId];
     const isSpectator = this.spectators.has(playerId);
     const name = player ? player.name : (isSpectator ? 'Spectator' : 'Unknown');
-    const color = player ? player.color : PLAYER_COLORS[0];
+    const colorIndex = player ? player.colorIndex : -1;
     const msg = {
       id: Date.now() + '-' + Math.random().toString(36).slice(2, 6),
       playerId,
       playerName: name,
-      playerColor: color,
+      colorIndex,
       message: message.slice(0, MAX_CHAT_LENGTH),
       timestamp: Date.now(),
       isSpectator,
     };
     this.chatHistory.push(msg);
-    if (this.chatHistory.length > 100) {
-      this.chatHistory = this.chatHistory.slice(-50);
+    // Keep max messages with efficient truncation (O(1) instead of O(n))
+    if (this.chatHistory.length > MAX_CHAT_HISTORY) {
+      this.chatHistory = this.chatHistory.slice(-MAX_CHAT_HISTORY);
     }
     return msg;
   }
@@ -223,6 +238,9 @@ class Room {
       this.trailGrid[y] = new Int8Array(GRID_SIZE);
     }
 
+    // Per-player cell count for O(1) score updates
+    this.cellCounts = {};
+
     this.playerOrder = Object.keys(this.players);
     this.playerOrder.forEach((pid, idx) => {
       const p = this.players[pid];
@@ -233,12 +251,15 @@ class Room {
       p.playerIndex = idx + 1;
       p.forfeited = false;
 
+      this.cellCounts[p.playerIndex] = 0;
+
       const half = Math.floor(START_TERRITORY_SIZE / 2);
       for (let dy = -half; dy <= half; dy++) {
         for (let dx = -half; dx <= half; dx++) {
           const gx = p.x + dx, gy = p.y + dy;
           if (gx >= 0 && gx < GRID_SIZE && gy >= 0 && gy < GRID_SIZE) {
             this.grid[gy][gx] = p.playerIndex;
+            this.cellCounts[p.playerIndex]++;
           }
         }
       }
@@ -246,7 +267,7 @@ class Room {
 
     this._transitionState(GameState.PLAYING);
     this.gameStartTime = Date.now();
-    this.gameEndTime = Date.now() + this.timeLimit * 1000;
+    this.gameEndTime = this.timeLimit > 0 ? Date.now() + this.timeLimit * 1000 : null;
     this.winnerId = null;
     this.winnerName = null;
     this.playAgainVotes.clear();
@@ -261,7 +282,7 @@ class Room {
   }
 
   getRemainingTime() {
-    if (!this.gameEndTime) return this.timeLimit;
+    if (!this.gameEndTime) return null;
     return Math.max(0, Math.ceil((this.gameEndTime - Date.now()) / 1000));
   }
 
@@ -293,13 +314,43 @@ class Room {
   addPlayAgainVote(playerId) {
     if (this.state !== GameState.FINISHED) return { success: false };
     this.playAgainVotes.add(playerId);
-    const activePlayers = Object.keys(this.players);
-    const allVoted = activePlayers.every(pid => this.playAgainVotes.has(pid));
+    this.playAgainDeclined.delete(playerId); // Remove from declined if they changed mind
+    // Optimize: check if we have all votes by comparing set sizes (O(1) vs O(n))
+    const playerCount = Object.keys(this.players).length;
+    const allVoted = this.playAgainVotes.size === playerCount && playerCount > 0;
     return { success: true, allVoted };
+  }
+
+  addPlayAgainDeclined(playerId) {
+    if (this.state !== GameState.FINISHED) return { success: false };
+    this.playAgainDeclined.add(playerId);
+    this.playAgainVotes.delete(playerId); // Remove from votes if they changed mind
+    return { success: true };
   }
 
   removePlayAgainVote(playerId) {
     this.playAgainVotes.delete(playerId);
+  }
+
+  /**
+   * Get play-again status for all players plus any who left
+   * @returns {{ players: Array<{id, name, colorIndex, status}>, votedCount, totalPlayers }}
+   */
+  getPlayAgainStatus() {
+    const players = [];
+    for (const pid of this.playerOrder) {
+      const p = this.players[pid];
+      if (!p) continue;
+      let status = 'waiting';
+      if (this.playAgainVotes.has(pid)) status = 'voted';
+      else if (this.playAgainDeclined.has(pid)) status = 'declined';
+      players.push({ id: pid, name: p.name, colorIndex: p.colorIndex, status });
+    }
+    return {
+      players,
+      votedCount: this.playAgainVotes.size,
+      totalPlayers: Object.keys(this.players).length,
+    };
   }
 
   resetToWaiting() {
@@ -312,7 +363,11 @@ class Room {
     this.winnerId = null;
     this.winnerName = null;
     this.playAgainVotes.clear();
+    this.playAgainDeclined.clear();
     this.chatHistory = [];
+    // Clear stale rate limiter entries
+    this.actionLimiter.cleanup();
+    this.chatLimiter.cleanup();
     for (const pid of this.playerOrder) {
       const p = this.players[pid];
       if (p) {
@@ -364,6 +419,14 @@ class Room {
       if (!p) continue;
       if (p.forfeited) continue;
 
+      // Check for disconnected player grace period expiry
+      if (p.disconnected && p.disconnectTime && Date.now() - p.disconnectTime > RECONNECT_GRACE_MS) {
+        p.disconnected = false;
+        this.killPlayer(pid, 'disconnect_timeout', null, gridChanges);
+        events.push({ type: 'kill', victim: pid, reason: 'disconnect_timeout' });
+        continue;
+      }
+
       if (!p.alive) {
         if (Date.now() - p.deathTime > RESPAWN_DELAY_MS) {
           this.respawnPlayer(pid, gridChanges);
@@ -371,6 +434,9 @@ class Room {
         }
         continue;
       }
+
+      // Skip movement for disconnected players
+      if (p.disconnected) continue;
 
       const dir = DIRECTIONS[p.direction];
       if (!dir) continue;
@@ -386,8 +452,17 @@ class Room {
       if (trailOwnerIdx !== 0) {
         const trailOwnerId = this.playerOrder.find(id => this.players[id] && this.players[id].playerIndex === trailOwnerIdx);
         if (trailOwnerIdx === p.playerIndex) {
-          this.killPlayer(pid, 'self_trail', null, gridChanges);
-          events.push({ type: 'kill', victim: pid, reason: 'self_trail' });
+          // Crossing own trail — detect loop and auto-capture enclosed area
+          const loopStart = p.trail.findIndex(pt => pt.x === newX && pt.y === newY);
+          if (loopStart >= 0) {
+            const loop = p.trail.slice(loopStart);
+            const captured = captureTerritory(this.grid, p.playerIndex, loop, this.cellCounts);
+            for (const pos of loop) { this.trailGrid[pos.y][pos.x] = 0; }
+            for (const pos of loop) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'trail_to_territory' }); }
+            for (const pos of captured) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'captured' }); }
+            p.trail = p.trail.slice(0, loopStart);
+            events.push({ type: 'capture', playerId: pid, capturedCount: captured.length });
+          }
         } else if (trailOwnerId) {
           this.killPlayer(trailOwnerId, 'trail_cut', pid, gridChanges);
           events.push({ type: 'kill', victim: trailOwnerId, killer: pid, reason: 'trail_cut' });
@@ -416,7 +491,7 @@ class Room {
       const cellOwner = this.grid[newY][newX];
 
       if (cellOwner === p.playerIndex && p.trail.length > 0) {
-        const captured = captureTerritory(this.grid, p.playerIndex, p.trail);
+        const captured = captureTerritory(this.grid, p.playerIndex, p.trail, this.cellCounts);
         for (const pos of p.trail) { this.trailGrid[pos.y][pos.x] = 0; }
         for (const pos of p.trail) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'trail_to_territory' }); }
         for (const pos of captured) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'captured' }); }
@@ -442,6 +517,7 @@ class Room {
       gridChanges.push({ x: pos.x, y: pos.y, owner: 0, type: 'trail_removed' });
     }
     p.trail = [];
+    // Clear territory — decrement cell count
     for (let y = 0; y < GRID_SIZE; y++) {
       for (let x = 0; x < GRID_SIZE; x++) {
         if (this.grid[y][x] === p.playerIndex) {
@@ -450,6 +526,7 @@ class Room {
         }
       }
     }
+    if (this.cellCounts) this.cellCounts[p.playerIndex] = 0;
     if (killerId && this.players[killerId]) this.players[killerId].kills++;
   }
 
@@ -490,7 +567,15 @@ class Room {
       for (let dx = -half; dx <= half; dx++) {
         const gx = p.x + dx, gy = p.y + dy;
         if (gx >= 0 && gx < GRID_SIZE && gy >= 0 && gy < GRID_SIZE) {
+          const prev = this.grid[gy][gx];
+          if (prev !== 0 && prev !== p.playerIndex && this.cellCounts && this.cellCounts[prev] !== undefined) {
+            this.cellCounts[prev]--;
+          }
           this.grid[gy][gx] = p.playerIndex;
+          if (this.cellCounts) {
+            if (this.cellCounts[p.playerIndex] === undefined) this.cellCounts[p.playerIndex] = 0;
+            if (prev !== p.playerIndex) this.cellCounts[p.playerIndex]++;
+          }
           gridChanges.push({ x: gx, y: gy, owner: p.playerIndex, type: 'respawn_territory' });
         }
       }
@@ -499,17 +584,12 @@ class Room {
 
   updateScores() {
     const totalCells = GRID_SIZE * GRID_SIZE;
-    const counts = {};
-    for (const pid of this.playerOrder) { const p = this.players[pid]; if (p) counts[p.playerIndex] = 0; }
-    for (let y = 0; y < GRID_SIZE; y++) {
-      for (let x = 0; x < GRID_SIZE; x++) {
-        const owner = this.grid[y][x];
-        if (owner !== 0 && counts[owner] !== undefined) counts[owner]++;
-      }
-    }
     for (const pid of this.playerOrder) {
       const p = this.players[pid];
-      if (p) p.score = Math.round((counts[p.playerIndex] / totalCells) * 10000) / 100;
+      if (p && this.cellCounts) {
+        const count = this.cellCounts[p.playerIndex] || 0;
+        p.score = Math.round((count / totalCells) * 10000) / 100;
+      }
     }
   }
 

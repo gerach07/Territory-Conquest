@@ -5,7 +5,6 @@
 import React, { useState, memo } from 'react';
 import { useI18n } from '../i18n/I18nContext';
 import { PLAYER_COLORS } from '../constants';
-import { escapeHtml } from '../utils/gameHelpers';
 
 /** Fallback clipboard copy for non-HTTPS / older browsers */
 function fallbackCopy(text) {
@@ -71,9 +70,13 @@ const WaitingRoom = memo(({
                 🔓 {t('waiting.open')}
               </span>
             )}
-            {timeLimit && (
+            {timeLimit > 0 ? (
               <span className="text-xs text-blue-300 bg-blue-500/15 rounded-full py-1.5 px-3.5 border border-blue-500/30 backdrop-blur-sm shadow-sm transition-transform hover:scale-105">
                 ⏱️ {Math.round(timeLimit / 60)} {t('waiting.minGame')}
+              </span>
+            ) : (
+              <span className="text-xs text-purple-300 bg-purple-500/15 rounded-full py-1.5 px-3.5 border border-purple-500/30 backdrop-blur-sm shadow-sm transition-transform hover:scale-105">
+                ♾️ {t('login.noLimit')}
               </span>
             )}
           </div>
@@ -104,7 +107,7 @@ const WaitingRoom = memo(({
                   style={{ background: color + '22', borderColor: color + '55', boxShadow: `0 4px 12px ${color}30` }}>
                   <span className="drop-shadow">✓</span>
                 </div>
-                <p className="text-xs font-bold truncate" style={{ color }}>{escapeHtml(p.name)}</p>
+                <p className="text-xs font-bold truncate" style={{ color }}>{p.name}</p>
                 <p className="text-[0.55rem] uppercase tracking-widest font-semibold" style={{ color: color + 'aa' }}>{t('waiting.ready')}</p>
               </div>
             );
@@ -241,7 +244,7 @@ const WaitingRoom = memo(({
                   <button key={p.id} onClick={() => { handleKickPlayer(p.id); setKickOpen(false); }}
                     className="w-full flex items-center gap-3 p-3 rounded-xl bg-slate-800/50 hover:bg-red-900/30 border border-slate-700/30 hover:border-red-500/30 transition-all">
                     <span className="w-5 h-5 rounded-full shadow-sm" style={{ background: color }} />
-                    <span className="text-sm text-white font-medium">{escapeHtml(p.name)}</span>
+                    <span className="text-sm text-white font-medium">{p.name}</span>
                   </button>
                 );
               })}

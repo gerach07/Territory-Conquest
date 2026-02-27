@@ -19,7 +19,7 @@ const {
   GRID_SIZE, TICK_MS, MAX_PLAYERS_PER_ROOM,
   ROOM_CLEANUP_INTERVAL_MS, ROOM_INACTIVE_TIMEOUT_MS,
   ROOM_GAMEOVER_TIMEOUT_MS, IP_RATE_LIMIT_MAX, MAX_CHAT_LENGTH,
-  PLAYER_COLORS, DIRECTIONS, GameState,
+  PLAYER_COLORS, DIRECTIONS, GameState, RECONNECT_GRACE_MS,
   MIN_GAME_TIME_SECONDS, MAX_GAME_TIME_SECONDS, DEFAULT_GAME_TIME_SECONDS,
 } = require('./src/constants');
 const Room = require('./src/models/Room');
@@ -79,10 +79,11 @@ const io = socketIo(server, {
 
 const rooms = {};
 const playerToRoom = {};
+const disconnectedPlayers = new Map(); // key: `${roomId}:${playerName}`, value: { socketId, playerData, roomId, timestamp, password }
 const ipRateLimiter = new RateLimiter(IP_RATE_LIMIT_MAX, 60000);
 const pinTracker = new Map();
 const PIN_RATE_WINDOW = 60000;
-const PIN_RATE_MAX = 5;
+const PIN_RATE_MAX = 3;  // Reduced from 5 for better brute-force protection
 
 // Room locks (mutex for concurrent operations)
 const roomLocks = new Map();
@@ -90,25 +91,17 @@ const roomLocks = new Map();
 function acquireRoomLock(roomId) {
   let chain = roomLocks.get(roomId) || Promise.resolve();
   let release;
-  const next = new Promise(resolve => { release = resolve; });
+  const next = new Promise(resolve => {
+    release = () => {
+      resolve();
+      // Clean up: if this is the last pending lock, remove from map
+      if (roomLocks.get(roomId) === next) {
+        roomLocks.delete(roomId);
+      }
+    };
+  });
   roomLocks.set(roomId, chain.then(() => next));
   return chain.then(() => release);
-}
-
-// ============================================================================
-// IP CONNECTION TRACKER
-// ============================================================================
-
-const ipConnectionTracker = new Map();
-
-function trackIpConnection(ip) {
-  const now = Date.now();
-  let entry = ipConnectionTracker.get(ip);
-  if (!entry) { entry = { ts: [] }; ipConnectionTracker.set(ip, entry); }
-  entry.ts = entry.ts.filter(t => now - t < 60000);
-  if (entry.ts.length >= IP_RATE_LIMIT_MAX) return false;
-  entry.ts.push(now);
-  return true;
 }
 
 // ============================================================================
@@ -150,7 +143,7 @@ function startGameLoop(roomId) {
 // PLAYER LEAVE
 // ============================================================================
 
-function handlePlayerLeave(socketId) {
+async function handlePlayerLeave(socketId) {
   const roomId = playerToRoom[socketId];
   if (!roomId) return;
   const room = rooms[roomId];
@@ -163,50 +156,90 @@ function handlePlayerLeave(socketId) {
     delete playerToRoom[socketId]; return;
   }
 
-  const player = room.players[socketId];
-  const playerName = player?.name;
+  const release = await acquireRoomLock(roomId);
+  try {
+    const player = room.players[socketId];
+    const playerName = player?.name;
 
-  if (room.state === GameState.PLAYING && player) {
-    const gridChanges = [];
-    room.killPlayer(socketId, 'disconnect', null, gridChanges);
-    io.to(roomId).emit('gameState', {
-      ...room.getStateForClients(), gridChanges,
-      events: [{ type: 'disconnect', playerId: socketId }],
-    });
-  }
-
-  delete room.players[socketId];
-  room.playerOrder = room.playerOrder.filter(id => id !== socketId);
-
-  if (room.isEmpty()) {
-    room.cleanup();
-    room.spectators.forEach(sid => {
-      io.to(sid).emit('roomClosed');
-      const specSocket = io.sockets.sockets.get(sid); specSocket?.leave(roomId);
-      delete playerToRoom[sid];
-    });
-    delete rooms[roomId];
-  } else {
-    if (room.hostId === socketId) {
-      const remaining = Object.keys(room.players)[0];
-      if (remaining) { room.hostId = remaining; room.hostName = room.players[remaining].name; }
-    }
-    if (room.state === GameState.WAITING) {
-      io.to(roomId).emit('playerLeft', {
-        playerId: socketId, playerName,
-        players: room.getPlayerList(), hostId: room.hostId,
+    // During PLAYING state, store player for reconnection instead of killing immediately
+    if (room.state === GameState.PLAYING && player && player.alive) {
+      const reconnectKey = `${roomId}:${playerName}`;
+      disconnectedPlayers.set(reconnectKey, {
+        oldSocketId: socketId,
+        playerData: { ...player }, // shallow copy
+        roomId,
+        timestamp: Date.now(),
+        password: room.password, // Store room password for rejoin validation
       });
+      // Mark as disconnected but keep player in room (will be killed if grace period expires)
+      player.disconnected = true;
+      player.disconnectTime = Date.now();
+      io.to(roomId).emit('playerDisconnecting', { playerId: socketId, playerName, gracePeriod: RECONNECT_GRACE_MS });
+    } else if (room.state === GameState.PLAYING && player) {
+      // Player already dead, just emit disconnect
+      const gridChanges = [];
+      room.killPlayer(socketId, 'disconnect', null, gridChanges);
+      io.to(roomId).emit('gameState', {
+        ...room.getStateForClients(), gridChanges,
+        events: [{ type: 'disconnect', playerId: socketId }],
+      });
+    }
+
+    // If alive and playing, don't delete yet — wait for reconnection or grace period
+    if (room.state === GameState.PLAYING && player?.alive && player?.disconnected) {
+      const s = io.sockets.sockets.get(socketId); s?.leave(roomId);
+      delete playerToRoom[socketId];
+      return; // Don't delete player yet
+    }
+
+    delete room.players[socketId];
+    room.playerOrder = room.playerOrder.filter(id => id !== socketId);
+
+    if (room.isEmpty()) {
+      room.cleanup();
+      room.spectators.forEach(sid => {
+        io.to(sid).emit('roomClosed');
+        const specSocket = io.sockets.sockets.get(sid); specSocket?.leave(roomId);
+        delete playerToRoom[sid];
+      });
+      delete rooms[roomId];
+      roomLocks.delete(roomId);
     } else {
-      io.to(roomId).emit('playerDisconnected', {
-        playerId: socketId, playerName,
-        players: room.getPlayerList(),
-      });
+      if (room.hostId === socketId) {
+        const remaining = Object.keys(room.players)[0];
+        if (remaining) { room.hostId = remaining; room.hostName = room.players[remaining].name; }
+      }
+      if (room.state === GameState.WAITING) {
+        io.to(roomId).emit('playerLeft', {
+          playerId: socketId, playerName,
+          players: room.getPlayerList(), hostId: room.hostId,
+        });
+      } else if (room.state === GameState.FINISHED) {
+        // Clean up their votes
+        room.playAgainVotes.delete(socketId);
+        room.playAgainDeclined.delete(socketId);
+        // Send disconnect + updated play-again status with 'left' marker
+        const status = room.getPlayAgainStatus();
+        status.leftPlayer = { id: socketId, name: playerName };
+        io.to(roomId).emit('playerDisconnected', {
+          playerId: socketId, playerName,
+          players: room.getPlayerList(),
+          playAgainStatus: status,
+        });
+      } else {
+        io.to(roomId).emit('playerDisconnected', {
+          playerId: socketId, playerName,
+          players: room.getPlayerList(),
+        });
+      }
+      room.touch();
     }
-    room.touch();
-  }
 
-  const s = io.sockets.sockets.get(socketId); s?.leave(roomId);
-  delete playerToRoom[socketId];
+    const s = io.sockets.sockets.get(socketId); s?.leave(roomId);
+    delete playerToRoom[socketId];
+  } finally {
+    release();
+  }
 }
 
 // ============================================================================
@@ -221,7 +254,7 @@ io.on('connection', (socket) => {
     socket.disconnect(true); return;
   }
 
-  console.log(`Connected: ${socket.id}`);
+  if (process.env.DEBUG) console.log(`Connected: ${socket.id}`);
 
   // ── JOIN ──
   socket.on('joinGame', async (payload) => {
@@ -233,12 +266,18 @@ io.on('connection', (socket) => {
     const name = sanitizeInput(playerName, 50) || 'Anonymous';
     const pwd = password ? sanitizeInput(password, 3) : null;
     let cIdx = typeof colorIndex === 'number' ? Math.max(0, Math.min(PLAYER_COLORS.length - 1, colorIndex)) : 0;
-    if (!roomId) return socket.emit('error', { error: 'Invalid room ID' });
+    if (!roomId || roomId.length < 4 || roomId.length > 10) {
+      return socket.emit('error', { error: 'Room ID must be 4-10 characters' });
+    }
+    if (!/^[A-Z0-9]+$/.test(roomId)) {
+      return socket.emit('error', { error: 'Invalid room ID format' });
+    }
 
     let room = rooms[roomId];
 
     if (isSpectating) {
       if (!room) return socket.emit('error', { error: 'Room does not exist' });
+      if (!ipRateLimiter.isAllowed(clientIp)) return socket.emit('error', { error: 'Too many requests' });
       if (!room.checkPassword(pwd)) return socket.emit('error', { error: 'Incorrect PIN' });
       if (!room.addSpectator(socket.id)) return socket.emit('error', { error: 'Spectator slots full' });
       playerToRoom[socket.id] = roomId; socket.join(roomId);
@@ -259,9 +298,13 @@ io.on('connection', (socket) => {
     if (isCreating) {
       if (room) return socket.emit('error', { error: 'Room already exists. Try a different code.' });
       room = new Room(roomId, pwd, name, socket.id);
-      // Apply time limit if provided
-      if (typeof timeLimit === 'number') {
-        room.timeLimit = Math.max(MIN_GAME_TIME_SECONDS, Math.min(MAX_GAME_TIME_SECONDS, Math.floor(timeLimit)));
+      // Apply time limit if provided (0 = no limit)
+      if (typeof timeLimit === 'number' && Number.isFinite(timeLimit) && timeLimit >= 0) {
+        if (timeLimit === 0) {
+          room.timeLimit = 0;
+        } else {
+          room.timeLimit = Math.max(MIN_GAME_TIME_SECONDS, Math.min(MAX_GAME_TIME_SECONDS, Math.floor(timeLimit)));
+        }
       }
       rooms[roomId] = room;
     } else {
@@ -349,30 +392,61 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── FORFEIT ──
+  // ── FORFEIT (Leave Game) ──
   socket.on('forfeit', async () => {
     const roomId = playerToRoom[socket.id];
     const room = rooms[roomId];
     if (!room || room.state !== GameState.PLAYING) return;
     const player = room.players[socket.id];
-    if (!player || player.forfeited) return;
+    if (!player) return;
 
     const release = await acquireRoomLock(roomId);
     try {
-      const result = room.forfeitPlayer(socket.id);
-      if (!result) return;
-
+      const playerName = player.name;
+      const wasAlive = player.alive && !player.forfeited;
+      
+      // Kill player if alive (clears their territory)
+      const gridChanges = [];
+      if (wasAlive) {
+        room.killPlayer(socket.id, 'leave', null, gridChanges);
+      }
+      
+      // Remove player from room entirely
+      delete room.players[socket.id];
+      room.playerOrder = room.playerOrder.filter(id => id !== socket.id);
+      
+      // Count remaining alive players
+      const alivePlayers = room.playerOrder.filter(pid => {
+        const p = room.players[pid];
+        return p && p.alive && !p.forfeited;
+      });
+      
+      // Emit leave event to remaining players
       io.to(roomId).emit('gameState', {
         ...room.getStateForClients(),
-        gridChanges: result.gridChanges,
-        events: [{ type: 'forfeit', playerId: socket.id, playerName: player.name }],
+        gridChanges,
+        events: [{ type: 'leave', playerId: socket.id, playerName }],
       });
-
-      if (result.gameEnded) {
+      
+      // Check if game should end (only 1 player left)
+      if (alivePlayers.length <= 1) {
+        room.finishGame(alivePlayers[0] || null);
         if (room.tickTimer) { clearInterval(room.tickTimer); room.tickTimer = null; }
         const gameOverData = room.getGameOverData();
         io.to(roomId).emit('gameOver', gameOverData);
+      } else {
+        // Transfer host if needed
+        if (room.hostId === socket.id) {
+          const newHost = room.playerOrder[0];
+          if (newHost) { room.hostId = newHost; room.hostName = room.players[newHost].name; }
+        }
       }
+      
+      // Remove from room tracking
+      socket.leave(roomId);
+      delete playerToRoom[socket.id];
+      socket.emit('leftRoom');
+      
       room.touch();
     } finally {
       release();
@@ -399,13 +473,8 @@ io.on('connection', (socket) => {
           takenColors: room.getTakenColors(),
         });
       } else {
-        const player = room.players[socket.id];
-        io.to(roomId).emit('playAgainVote', {
-          playerId: socket.id,
-          playerName: player ? player.name : 'Player',
-          votes: Array.from(room.playAgainVotes),
-          totalPlayers: room.playerCount(),
-        });
+        const status = room.getPlayAgainStatus();
+        io.to(roomId).emit('playAgainVote', status);
       }
       room.touch();
     } finally {
@@ -413,16 +482,20 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('declinePlayAgain', () => {
+  socket.on('declinePlayAgain', async () => {
     const roomId = playerToRoom[socket.id];
     const room = rooms[roomId];
-    if (!room) return;
-    room.removePlayAgainVote(socket.id);
-    const player = room.players[socket.id];
-    io.to(roomId).emit('playAgainDeclined', {
-      playerId: socket.id,
-      playerName: player ? player.name : 'Player',
-    });
+    if (!room || room.state !== GameState.FINISHED) return;
+
+    const release = await acquireRoomLock(roomId);
+    try {
+      room.addPlayAgainDeclined(socket.id);
+      const status = room.getPlayAgainStatus();
+      io.to(roomId).emit('playAgainVote', status);
+      room.touch();
+    } finally {
+      release();
+    }
   });
 
   // ── KICK ──
@@ -439,7 +512,6 @@ io.on('connection', (socket) => {
       io.to(targetId).emit('kicked', { message: 'You have been kicked from the room' });
       delete playerToRoom[targetId];
       const kickedSocket = io.sockets.sockets.get(targetId); kickedSocket?.leave(roomId);
-      room.playerOrder = room.playerOrder.filter(id => id !== targetId);
       io.to(roomId).emit('playerKicked', {
         targetId, players: room.getPlayerList(),
         hostId: room.hostId, takenColors: room.getTakenColors(),
@@ -450,33 +522,129 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ── REJOIN (reconnection recovery) ──
+  socket.on('rejoinRoom', async (payload) => {
+    if (!payload || typeof payload !== 'object') return;
+    const roomId = sanitizeInput(payload.gameId, 50).toUpperCase();
+    const playerName = sanitizeInput(payload.playerName, 50);
+    const password = payload.password ? sanitizeInput(payload.password, 3) : null;
+    const room = rooms[roomId];
+    if (!room) return socket.emit('roomClosed');
+
+    const release = await acquireRoomLock(roomId);
+    try {
+      // Check for disconnected player awaiting reconnection
+      const reconnectKey = `${roomId}:${playerName}`;
+      const disconnected = disconnectedPlayers.get(reconnectKey);
+
+      if (disconnected && Date.now() - disconnected.timestamp < RECONNECT_GRACE_MS) {
+        // Validate password if room had one
+        if (disconnected.password && disconnected.password !== password) {
+          return socket.emit('error', { error: 'Invalid PIN for reconnection' });
+        }
+
+        // Reconnect: swap old socket ID to new socket ID in room
+        const oldSocketId = disconnected.oldSocketId;
+        const playerData = room.players[oldSocketId];
+
+        if (playerData && playerData.alive) {
+          // Move player data to new socket ID
+          delete room.players[oldSocketId];
+          room.players[socket.id] = playerData;
+          playerData.disconnected = false;
+          playerData.disconnectTime = 0;
+          room.playerOrder = room.playerOrder.map(id => id === oldSocketId ? socket.id : id);
+          if (room.hostId === oldSocketId) room.hostId = socket.id;
+
+          socket.join(roomId);
+          playerToRoom[socket.id] = roomId;
+          disconnectedPlayers.delete(reconnectKey);
+
+          if (room.state === GameState.PLAYING) {
+            const state = room.getStateForClients();
+            state.gridChanges = [];
+            state.events = [];
+            socket.emit('gameStarted', {
+              gameState: state,
+              grid: room.getFullGridForClient(),
+              timeLimit: room.timeLimit,
+            });
+            io.to(roomId).emit('playerReconnected', { playerId: socket.id, playerName });
+          }
+          return;
+        }
+      }
+
+      // Fallback: check if this socket.id is already in the room (same session)
+      if (room.players[socket.id]) {
+        socket.join(roomId);
+        playerToRoom[socket.id] = roomId;
+        if (room.state === GameState.PLAYING) {
+          const state = room.getStateForClients();
+          state.gridChanges = [];
+          state.events = [];
+          socket.emit('gameStarted', {
+            gameState: state,
+            grid: room.getFullGridForClient(),
+            timeLimit: room.timeLimit,
+          });
+        } else if (room.state === GameState.FINISHED) {
+          socket.emit('gameOver', room.getGameOverData());
+        } else {
+          socket.emit('gameJoined', {
+            playerId: socket.id, roomId: room.roomId,
+            players: room.getPlayerList(), state: room.state,
+            hostId: room.hostId, isHost: room.isHost(socket.id),
+            takenColors: room.getTakenColors(),
+            gridSize: GRID_SIZE, maxPlayers: MAX_PLAYERS_PER_ROOM, colors: PLAYER_COLORS,
+            timeLimit: room.timeLimit,
+          });
+        }
+      }
+    } finally {
+      release();
+    }
+  });
+
   // ── LEAVE ──
-  socket.on('leaveRoom', () => { handlePlayerLeave(socket.id); socket.emit('leftRoom'); });
-  socket.on('disconnect', () => { handlePlayerLeave(socket.id); console.log(`Disconnected: ${socket.id}`); });
+  socket.on('leaveRoom', async () => { await handlePlayerLeave(socket.id); socket.emit('leftRoom'); });
+  socket.on('disconnect', async () => { await handlePlayerLeave(socket.id); if (process.env.DEBUG) console.log(`Disconnected: ${socket.id}`); });
 });
 
 // ============================================================================
 // HTTP API
 // ============================================================================
 
-app.get('/health', (req, res) => res.json({
-  status: 'ok',
-  uptime: process.uptime(),
-  version: pkg.version,
-  rooms: Object.keys(rooms).length,
-  players: io.engine?.clientsCount || 0,
-  nodeVersion: process.version,
-  memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-}));
+app.get('/health', (req, res) => {
+  const base = {
+    status: 'ok',
+    version: pkg.version,
+    rooms: Object.keys(rooms).length,
+    players: io.engine?.clientsCount || 0,
+  };
+  // Only include internal details in development
+  if (process.env.NODE_ENV === 'development') {
+    base.uptime = process.uptime();
+    base.nodeVersion = process.version;
+    base.memoryMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+  }
+  res.json(base);
+});
 
 app.get('/version', (req, res) => {
-  res.json({
-    name: pkg.name, version: pkg.version, node: process.version,
-    uptime: Math.floor(process.uptime()),
+  const base = {
+    name: pkg.name,
+    version: pkg.version,
     activeRooms: Object.keys(rooms).length,
     connectedSockets: io.engine?.clientsCount || 0,
-    memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-  });
+  };
+  // Only include internal details in development
+  if (process.env.NODE_ENV === 'development') {
+    base.node = process.version;
+    base.uptime = Math.floor(process.uptime());
+    base.memoryMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+  }
+  res.json(base);
 });
 
 app.get('/rooms', (req, res) => {
@@ -551,6 +719,7 @@ setInterval(() => {
       });
       console.log(`Cleaning up stale room: ${id}`);
       delete rooms[id];
+      roomLocks.delete(id);
     }
   });
   // Cleanup expired PIN rate limit entries
@@ -560,10 +729,10 @@ setInterval(() => {
   }
   // Cleanup expired IP rate limit entries
   ipRateLimiter.cleanup();
-  // Cleanup IP connection tracker
-  for (const [ip, entry] of ipConnectionTracker) {
-    entry.ts = entry.ts.filter(t => now - t < 60000);
-    if (entry.ts.length === 0) ipConnectionTracker.delete(ip);
+  // Cleanup expired disconnectedPlayers entries
+  const dcNow = Date.now();
+  for (const [key, entry] of disconnectedPlayers) {
+    if (dcNow - entry.timestamp > RECONNECT_GRACE_MS) disconnectedPlayers.delete(key);
   }
   // Cleanup orphaned locks
   for (const [id] of roomLocks) {
