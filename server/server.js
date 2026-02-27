@@ -120,6 +120,26 @@ function startGameLoop(roomId) {
       if (room.state !== GameState.PLAYING) return;
       const result = room.tick();
       if (!result) return;
+
+      // If room is now empty (all players disconnected & removed), clean up
+      if (room.isEmpty()) {
+        clearInterval(room.tickTimer); room.tickTimer = null;
+        room.cleanup();
+        room.spectators.forEach(sid => {
+          io.to(sid).emit('roomClosed');
+          const specSocket = io.sockets.sockets.get(sid); specSocket?.leave(roomId);
+          delete playerToRoom[sid];
+        });
+        delete rooms[roomId];
+        roomLocks.delete(roomId);
+        return;
+      }
+
+      // Transfer host if current host was removed
+      if (!room.players[room.hostId]) {
+        transferHost(room, roomId);
+      }
+
       const state = room.getStateForClients();
       state.gridChanges = result.gridChanges;
       state.events = result.events;
@@ -137,6 +157,19 @@ function startGameLoop(roomId) {
       release();
     }
   }, TICK_MS);
+}
+
+// ============================================================================
+// HOST TRANSFER HELPER
+// ============================================================================
+
+function transferHost(room, roomId) {
+  const remaining = Object.keys(room.players).find(id => !room.players[id]?.disconnected) || Object.keys(room.players)[0];
+  if (remaining) {
+    room.hostId = remaining;
+    room.hostName = room.players[remaining].name;
+    io.to(roomId).emit('hostChanged', { hostId: room.hostId, hostName: room.hostName });
+  }
 }
 
 // ============================================================================
@@ -175,6 +208,8 @@ async function handlePlayerLeave(socketId) {
       player.disconnected = true;
       player.disconnectTime = Date.now();
       io.to(roomId).emit('playerDisconnecting', { playerId: socketId, playerName, gracePeriod: RECONNECT_GRACE_MS });
+      // Transfer host immediately so remaining players have a host
+      if (room.hostId === socketId) transferHost(room, roomId);
     } else if (room.state === GameState.PLAYING && player) {
       // Player already dead, just emit disconnect
       const gridChanges = [];
@@ -206,8 +241,7 @@ async function handlePlayerLeave(socketId) {
       roomLocks.delete(roomId);
     } else {
       if (room.hostId === socketId) {
-        const remaining = Object.keys(room.players)[0];
-        if (remaining) { room.hostId = remaining; room.hostName = room.players[remaining].name; }
+        transferHost(room, roomId);
       }
       if (room.state === GameState.WAITING) {
         io.to(roomId).emit('playerLeft', {
@@ -277,11 +311,12 @@ io.on('connection', (socket) => {
 
     if (isSpectating) {
       if (!room) return socket.emit('error', { error: 'Room does not exist' });
+      if (!room.allowSpectators) return socket.emit('error', { error: 'Spectators are not allowed in this room' });
       if (!ipRateLimiter.isAllowed(clientIp)) return socket.emit('error', { error: 'Too many requests' });
       if (!room.checkPassword(pwd)) return socket.emit('error', { error: 'Incorrect PIN' });
       if (!room.addSpectator(socket.id)) return socket.emit('error', { error: 'Spectator slots full' });
       playerToRoom[socket.id] = roomId; socket.join(roomId);
-      const data = { roomId: room.roomId, players: room.getPlayerList(), state: room.state, gridSize: GRID_SIZE };
+      const data = { roomId: room.roomId, players: room.getPlayerList(), state: room.state, gridSize: GRID_SIZE, hostId: room.hostId };
       if (room.state === GameState.PLAYING) {
         data.grid = room.getFullGridForClient();
         data.gameState = room.getStateForClients();
@@ -290,6 +325,7 @@ io.on('connection', (socket) => {
         data.gameOverData = room.getGameOverData();
       }
       data.chatHistory = room.chatHistory.slice(-50);
+      data.allowSpectators = room.allowSpectators;
       socket.emit('spectatorJoined', data);
       io.to(roomId).emit('spectatorUpdate', { count: room.spectators.size });
       room.touch(); return;
@@ -324,6 +360,7 @@ io.on('connection', (socket) => {
         takenColors: room.getTakenColors(),
         gridSize: GRID_SIZE, maxPlayers: MAX_PLAYERS_PER_ROOM, colors: PLAYER_COLORS,
         timeLimit: room.timeLimit,
+        allowSpectators: room.allowSpectators,
       });
       socket.to(roomId).emit('playerJoined', {
         players: room.getPlayerList(), hostId: room.hostId,
@@ -414,6 +451,25 @@ io.on('connection', (socket) => {
       // Remove player from room entirely
       delete room.players[socket.id];
       room.playerOrder = room.playerOrder.filter(id => id !== socket.id);
+
+      // Remove from room tracking
+      socket.leave(roomId);
+      delete playerToRoom[socket.id];
+      socket.emit('leftRoom');
+
+      // If no players left, close room and kick spectators
+      if (room.isEmpty()) {
+        if (room.tickTimer) { clearInterval(room.tickTimer); room.tickTimer = null; }
+        room.cleanup();
+        room.spectators.forEach(sid => {
+          io.to(sid).emit('roomClosed');
+          const specSocket = io.sockets.sockets.get(sid); specSocket?.leave(roomId);
+          delete playerToRoom[sid];
+        });
+        delete rooms[roomId];
+        roomLocks.delete(roomId);
+        return;
+      }
       
       // Count remaining alive players
       const alivePlayers = room.playerOrder.filter(pid => {
@@ -437,15 +493,9 @@ io.on('connection', (socket) => {
       } else {
         // Transfer host if needed
         if (room.hostId === socket.id) {
-          const newHost = room.playerOrder[0];
-          if (newHost) { room.hostId = newHost; room.hostName = room.players[newHost].name; }
+          transferHost(room, roomId);
         }
       }
-      
-      // Remove from room tracking
-      socket.leave(roomId);
-      delete playerToRoom[socket.id];
-      socket.emit('leftRoom');
       
       room.touch();
     } finally {
@@ -471,6 +521,7 @@ io.on('connection', (socket) => {
           hostId: room.hostId,
           state: room.state,
           takenColors: room.getTakenColors(),
+          allowSpectators: room.allowSpectators,
         });
       } else {
         const status = room.getPlayAgainStatus();
@@ -509,7 +560,7 @@ io.on('connection', (socket) => {
     try {
       const result = room.kickPlayer(socket.id, targetId);
       if (!result.success) return socket.emit('error', { error: result.error });
-      io.to(targetId).emit('kicked', { message: 'You have been kicked from the room' });
+      io.to(targetId).emit('kicked', { reason: 'host_kick' });
       delete playerToRoom[targetId];
       const kickedSocket = io.sockets.sockets.get(targetId); kickedSocket?.leave(roomId);
       io.to(roomId).emit('playerKicked', {
@@ -606,6 +657,28 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ── TOGGLE SPECTATORS ──
+  socket.on('toggleSpectators', async (payload) => {
+    const roomId = playerToRoom[socket.id];
+    const room = rooms[roomId];
+    if (!room) return;
+    if (!room.isHost(socket.id)) return socket.emit('error', { error: 'Only the host can toggle spectators' });
+    const allow = payload && typeof payload.allow === 'boolean' ? payload.allow : !room.allowSpectators;
+    room.allowSpectators = allow;
+    io.to(roomId).emit('spectatorsToggled', { allowSpectators: allow });
+    // If disabling, kick existing spectators
+    if (!allow) {
+      room.spectators.forEach(sid => {
+        io.to(sid).emit('kicked', { reason: 'spectators_disabled' });
+        const specSock = io.sockets.sockets.get(sid); specSock?.leave(roomId);
+        delete playerToRoom[sid];
+      });
+      room.spectators.clear();
+      io.to(roomId).emit('spectatorUpdate', { count: 0 });
+    }
+    room.touch();
+  });
+
   // ── LEAVE ──
   socket.on('leaveRoom', async () => { await handlePlayerLeave(socket.id); socket.emit('leftRoom'); });
   socket.on('disconnect', async () => { await handlePlayerLeave(socket.id); if (process.env.DEBUG) console.log(`Disconnected: ${socket.id}`); });
@@ -649,12 +722,17 @@ app.get('/version', (req, res) => {
 
 app.get('/rooms', (req, res) => {
   const list = Object.values(rooms)
-    .filter(r => r.state === GameState.WAITING && !r.isFull())
+    .filter(r => {
+      if (r.state === GameState.WAITING && !r.isFull()) return true;
+      if (r.state === GameState.PLAYING) return true;
+      return false;
+    })
     .map(r => ({
       roomId: r.roomId, hostName: r.hostName,
       hasPassword: r.hasPassword(), createdAt: r.createdAt,
       state: r.state, playerCount: r.playerCount(),
       maxPlayers: MAX_PLAYERS_PER_ROOM, spectatorCount: r.spectators.size,
+      allowSpectators: r.allowSpectators,
     }))
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, 50);
@@ -668,6 +746,7 @@ app.get('/rooms/:id', (req, res) => {
     exists: true, state: room.state, hasPassword: room.hasPassword(),
     playerCount: room.playerCount(), maxPlayers: MAX_PLAYERS_PER_ROOM,
     takenColors: room.getTakenColors(),
+    allowSpectators: room.allowSpectators,
   });
 });
 

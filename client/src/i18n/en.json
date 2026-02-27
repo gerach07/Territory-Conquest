@@ -49,6 +49,11 @@
   "login.roomFull": "Room Full",
   "login.spectatingRoom": "Spectating Room",
 
+  "spectator.watching": "Spectating",
+  "spectator.overview": "Overview",
+
+  "login.inProgress": "In Progress",
+
   "waiting.roomCode": "Room Code",
   "waiting.hostControls": "Host Controls",
   "waiting.startGame": "🎮 Start Game",
@@ -73,6 +78,11 @@
   "waiting.waitingForHostHint": "The host will start the game when ready",
   "waiting.title": "Waiting for players…",
   "waiting.copied": "✅ Copied!",
+  "waiting.plusPin": "+ PIN",
+  "waiting.allowSpectators": "Allow Spectators",
+  "waiting.allowSpectatorsHint": "Let others watch the game",
+  "waiting.spectatorHint": "You will watch when the game starts",
+  "login.spectatorsOff": "No spectators",
   "waiting.plusPin": "(+ PIN)",
 
   "game.leaderboard": "🏆 Leaderboard",
@@ -155,5 +165,11 @@
   "msg.loading": "Loading...",
   "msg.noRooms": "No open rooms found",
   "msg.failedLoadRooms": "Failed to load rooms",
-  "msg.newGame": "🎮 New game starting!"
+  "msg.newGame": "🎮 New game starting!",
+  "msg.gameEnded": "Game has ended",
+  "msg.gameInProgressSpectate": "Game in progress — joining as spectator",
+  "msg.spectatorsDisabled": "Spectators are not allowed in this room",
+  "msg.playerDisconnected": "{0} disconnected",
+  "msg.playerDisconnecting": "{0} lost connection — waiting to reconnect",
+  "msg.youAreHost": "You are now the room host"
 }

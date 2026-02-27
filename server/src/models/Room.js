@@ -128,6 +128,9 @@ class Room {
     this.playAgainVotes = new Set();
     this.playAgainDeclined = new Set();
 
+    // Spectator access control
+    this.allowSpectators = true;
+
     // Winner info
     this.winnerId = null;
     this.winnerName = null;
@@ -424,6 +427,9 @@ class Room {
         p.disconnected = false;
         this.killPlayer(pid, 'disconnect_timeout', null, gridChanges);
         events.push({ type: 'kill', victim: pid, reason: 'disconnect_timeout' });
+        // Fully remove the disconnected player from the room
+        delete this.players[pid];
+        this.playerOrder = this.playerOrder.filter(id => id !== pid);
         continue;
       }
 

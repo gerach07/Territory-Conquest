@@ -319,7 +319,9 @@ const LoginView = memo(({
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0 ml-2">
                         <span className="text-xs text-slate-400">👥 {room.playerCount}/{room.maxPlayers || 6}</span>
-                        {room.hasPassword ? (
+                        {room.state === 'playing' ? (
+                          <span className="text-[0.65rem] bg-purple-500/15 text-purple-300 px-2 py-0.5 rounded-full border border-purple-500/20">🎮 {t('login.inProgress')}</span>
+                        ) : room.hasPassword ? (
                           <span className="text-[0.65rem] bg-orange-500/15 text-orange-300 px-2 py-0.5 rounded-full border border-orange-500/20">🔒</span>
                         ) : (
                           <span className="text-[0.65rem] bg-green-500/15 text-green-300 px-2 py-0.5 rounded-full border border-green-500/20">{t('login.open') || 'Open'}</span>
@@ -331,6 +333,9 @@ const LoginView = memo(({
                         <div className="flex items-center gap-2 text-xs text-slate-400 flex-wrap">
                           <span>👥 {room.playerCount}/{room.maxPlayers || 6}</span>
                           {room.spectatorCount > 0 && <span>👁️ {room.spectatorCount}</span>}
+                          {room.state === 'playing'
+                            ? <span className="text-purple-300">{t('login.inProgress')}</span>
+                            : <span className="text-green-300">{t('login.open') || 'Open'}</span>}
                         </div>
                         {room.hasPassword && (
                           <input
@@ -346,26 +351,35 @@ const LoginView = memo(({
                           />
                         )}
                         <div className="flex gap-2">
+                          {room.state !== 'playing' && (
+                            <button
+                              onClick={() => {
+                                setPendingJoin({ roomCode: room.roomId, pin: room.hasPassword ? joinRoomPin : null, spectate: false });
+                                if (room.hasPassword && joinRoomPin.length !== 3) return;
+                                onJoinRoom(room.roomId, false);
+                              }}
+                              disabled={(room.hasPassword && joinRoomPin.length !== 3) || room.playerCount >= (room.maxPlayers || 6)}
+                              className="flex-1 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-lg transition text-sm"
+                            >
+                              {room.playerCount >= (room.maxPlayers || 6) ? (t('login.roomFull') || 'Full') : t('login.joinAsPlayer')}
+                            </button>
+                          )}
                           <button
                             onClick={() => {
-                              setPendingJoin({ roomCode: room.roomId, pin: room.hasPassword ? joinRoomPin : null, spectate: false });
+                              const pin = room.hasPassword ? joinRoomPin : null;
                               if (room.hasPassword && joinRoomPin.length !== 3) return;
-                              onJoinRoom(room.roomId, false);
+                              setPendingJoin({ roomCode: room.roomId, pin, spectate: true });
+                              if (pin) {
+                                // PIN already entered in the card — go directly
+                                onSpectate(room.roomId, pin);
+                              } else {
+                                onJoinRoom(room.roomId, true);
+                              }
                             }}
-                            disabled={(room.hasPassword && joinRoomPin.length !== 3) || room.playerCount >= (room.maxPlayers || 6)}
-                            className="flex-1 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-lg transition text-sm"
+                            disabled={(room.hasPassword && joinRoomPin.length !== 3) || room.allowSpectators === false}
+                            className={`${room.state === 'playing' ? 'flex-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white' : 'flex-1 py-2 border border-purple-500/40 text-purple-300 hover:bg-purple-500/15'} disabled:opacity-40 disabled:cursor-not-allowed font-bold rounded-lg transition text-sm`}
                           >
-                            {room.playerCount >= (room.maxPlayers || 6) ? (t('login.roomFull') || 'Full') : t('login.joinAsPlayer')}
-                          </button>
-                          <button
-                            onClick={() => {
-                              setPendingJoin({ roomCode: room.roomId, pin: room.hasPassword ? joinRoomPin : null, spectate: true });
-                              onJoinRoom(room.roomId, true);
-                            }}
-                            disabled={room.hasPassword && joinRoomPin.length !== 3}
-                            className="flex-1 py-2 border border-purple-500/40 text-purple-300 hover:bg-purple-500/15 disabled:opacity-40 disabled:cursor-not-allowed font-bold rounded-lg transition text-sm"
-                          >
-                            {t('login.spectate')}
+                            {room.allowSpectators === false ? `🚫 ${t('login.spectatorsOff') || 'No spectators'}` : `👁️ ${t('login.spectate')}`}
                           </button>
                         </div>
                       </div>

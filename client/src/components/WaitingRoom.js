@@ -21,8 +21,8 @@ function fallbackCopy(text) {
 }
 
 const WaitingRoom = memo(({
-  roomCode, roomPassword, players, isHost, myId, timeLimit,
-  handleStartGame, handleKickPlayer, handleBackToMenu,
+  roomCode, roomPassword, players, isHost, isSpectator, myId, timeLimit,
+  allowSpectators, handleStartGame, handleKickPlayer, handleToggleSpectators, handleBackToMenu,
 }) => {
   const { t }               = useI18n();
   const [copied, setCopied]   = useState(null);
@@ -128,6 +128,17 @@ const WaitingRoom = memo(({
         })}
       </div>
 
+      {/* ── Spectator badge ── */}
+      {isSpectator && (
+        <div className="glass-card p-3 border-purple-500/30 shadow-lg shadow-purple-900/20">
+          <div className="flex items-center justify-center gap-2">
+            <span className="text-lg">👁️</span>
+            <p className="text-sm font-semibold text-purple-300">{t('spectator.watching') || 'Spectating'}</p>
+          </div>
+          <p className="text-[0.6rem] text-slate-400 text-center mt-1">{t('waiting.spectatorHint') || 'You will watch when the game starts'}</p>
+        </div>
+      )}
+
       {/* ── Host controls ── */}
       {isHost && hasEnough && (
         <div className="glass-card p-4 space-y-3 border-yellow-500/30 shadow-xl shadow-yellow-900/20">
@@ -152,12 +163,38 @@ const WaitingRoom = memo(({
         </div>
       )}
 
-      {isHost && !hasEnough && (
+      {/* ── Allow spectators toggle (host only) ── */}
+      {isHost && (
+        <div className="glass-card p-4 border-slate-600/30">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <span className="text-base">👁️</span>
+              <div>
+                <p className="text-sm font-semibold text-white">{t('waiting.allowSpectators') || 'Allow Spectators'}</p>
+                <p className="text-[0.6rem] text-slate-500">{t('waiting.allowSpectatorsHint') || 'Let others watch the game'}</p>
+              </div>
+            </div>
+            <button
+              onClick={() => handleToggleSpectators(!allowSpectators)}
+              className={`relative w-11 h-6 rounded-full transition-colors duration-300 ${
+                allowSpectators ? 'bg-purple-500' : 'bg-slate-600'
+              }`}
+              aria-label={t('waiting.allowSpectators') || 'Toggle spectators'}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-300 ${
+                allowSpectators ? 'translate-x-5' : 'translate-x-0'
+              }`} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isHost && !hasEnough && !isSpectator && (
         <p className="text-xs text-slate-500">{t('waiting.hostHint')}</p>
       )}
 
       {/* ── Waiting for host (non-host player) ── */}
-      {!isHost && hasEnough && (
+      {!isHost && !isSpectator && hasEnough && (
         <div className="glass-card p-4 border-blue-500/30 shadow-xl shadow-blue-900/20">
           <div className="flex items-center justify-center gap-3">
             <span className="text-lg animate-pulse">⏳</span>
@@ -169,7 +206,7 @@ const WaitingRoom = memo(({
         </div>
       )}
 
-      {!isHost && !hasEnough && (
+      {!isHost && !isSpectator && !hasEnough && (
         <div className="glass-card p-4 border-blue-500/30">
           <p className="text-sm text-slate-400">{t('waiting.waitingForHost')}</p>
           <p className="text-xs text-slate-500 mt-1">{t('waiting.waitingHint')}</p>

@@ -49,6 +49,11 @@
   "login.roomFull": "Комната полна",
   "login.spectatingRoom": "Наблюдение за комнатой",
 
+  "spectator.watching": "Наблюдение",
+  "spectator.overview": "Обзор",
+
+  "login.inProgress": "Идёт игра",
+
   "waiting.roomCode": "Код комнаты",
   "waiting.hostControls": "Управление хоста",
   "waiting.startGame": "🎮 Начать игру",
@@ -73,6 +78,11 @@
   "waiting.waitingForHostHint": "Хост начнёт игру, когда будет готов",
   "waiting.title": "Ожидание игроков…",
   "waiting.copied": "✅ Скопировано!",
+  "waiting.plusPin": "+ PIN",
+  "waiting.allowSpectators": "Разрешить зрителей",
+  "waiting.allowSpectatorsHint": "Позволить другим смотреть игру",
+  "waiting.spectatorHint": "Ты будешь смотреть, когда игра начнётся",
+  "login.spectatorsOff": "Без зрителей",
   "waiting.plusPin": "(+ PIN)",
 
   "game.leaderboard": "🏆 Таблица лидеров",
@@ -155,5 +165,11 @@
   "msg.loading": "Загрузка...",
   "msg.noRooms": "Нет открытых комнат",
   "msg.failedLoadRooms": "Не удалось загрузить комнаты",
-  "msg.newGame": "🎮 Новая игра начинается!"
+  "msg.newGame": "🎮 Новая игра начинается!",
+  "msg.gameEnded": "Игра завершена",
+  "msg.gameInProgressSpectate": "Игра идёт — присоединяемся как зритель",
+  "msg.spectatorsDisabled": "Зрители не допускаются в эту комнату",
+  "msg.playerDisconnected": "{0} отключился",
+  "msg.playerDisconnecting": "{0} потерял соединение — ожидание переподключения",
+  "msg.youAreHost": "Ты теперь хост комнаты"
 }

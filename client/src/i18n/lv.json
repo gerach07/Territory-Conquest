@@ -49,6 +49,11 @@
   "login.roomFull": "Istaba pilna",
   "login.spectatingRoom": "Skatīties istabu",
 
+  "spectator.watching": "Skatās",
+  "spectator.overview": "Pārskats",
+
+  "login.inProgress": "Notiek spēle",
+
   "waiting.roomCode": "Istabas kods",
   "waiting.hostControls": "Saimnieka vadība",
   "waiting.startGame": "🎮 Sākt spēli",
@@ -73,6 +78,11 @@
   "waiting.waitingForHostHint": "Saimnieks sāks spēli, kad būs gatavs",
   "waiting.title": "Gaida spēlētājus…",
   "waiting.copied": "✅ Nokopēts!",
+  "waiting.plusPin": "+ PIN",
+  "waiting.allowSpectators": "Atļaut skatītājus",
+  "waiting.allowSpectatorsHint": "ıaut citiem skatīties spēli",
+  "waiting.spectatorHint": "Tu skatīsies, kad spēle sāksies",
+  "login.spectatorsOff": "Nav skatītāju",
   "waiting.plusPin": "(+ PIN)",
 
   "game.leaderboard": "🏆 Līderu tabula",
@@ -155,5 +165,11 @@
   "msg.loading": "Ielādē...",
   "msg.noRooms": "Nav atvērtu istabu",
   "msg.failedLoadRooms": "Neizdevās ielādēt istabas",
-  "msg.newGame": "🎮 Jauna spēle sākas!"
+  "msg.newGame": "🎮 Jauna spēle sākas!",
+  "msg.gameEnded": "Spēle ir beigusies",
+  "msg.gameInProgressSpectate": "Spēle notiek — pievienojies kā skatītājs",
+  "msg.spectatorsDisabled": "Skatītāji nav atļauti šajā istabā",
+  "msg.playerDisconnected": "{0} atvienojās",
+  "msg.playerDisconnecting": "{0} zaudēja savienojumu — gaida atkārtotu pieslēgšanos",
+  "msg.youAreHost": "Tu tagad esi istabas saimnieks"
 }

@@ -85,6 +85,7 @@ function App() {
   const [roomPassword, setRoomPassword] = useState(null);
   const [isHost,       setIsHost]       = useState(false);
   const [isSpectator,  setIsSpectator]  = useState(false);
+  const [allowSpectators, setAllowSpectators] = useState(true);
   const [gameTimeLimit, setGameTimeLimit] = useState(null);
   const [pendingJoin,  setPendingJoin]  = useState(null);
   const [playerNameDisplay, setPlayerNameDisplay] = useState(() => localStorage.getItem('tc_playerName') || '');
@@ -206,8 +207,35 @@ function App() {
           showToast(t('msg.roomNotFound'), '❌');
           setURLRoom(null);
           setLoginView('menu');
+        } else if (data.state === 'finished') {
+          // Game already ended
+          showToast(t('msg.gameEnded') || 'Game has ended', '🏁');
+          setURLRoom(null);
+          setLoginView('menu');
+        } else if (data.state === 'playing') {
+          // Game in progress — spectate only
+          if (!data.allowSpectators) {
+            showToast(t('msg.spectatorsDisabled') || 'Spectators not allowed', '🚫');
+            setURLRoom(null);
+            setLoginView('menu');
+            return;
+          }
+          const pin = urlInfo.password || null;
+          if (data.hasPassword && !pin) {
+            setPendingJoin({ roomCode: urlInfo.roomCode, pin: null, spectate: true });
+            setLoginView('enterPin');
+            showToast(t('msg.gameInProgressSpectate') || 'Game in progress — joining as spectator', '👁️');
+          } else {
+            // No password or PIN provided in URL — auto spectate
+            showToast(t('msg.gameInProgressSpectate') || 'Game in progress — joining as spectator', '👁️');
+            socketRef.current?.emit('joinGame', {
+              gameId: urlInfo.roomCode,
+              password: pin || undefined,
+              isSpectating: true,
+            });
+          }
         } else {
-          // Room exists – pre-fill join flow
+          // WAITING — normal join flow
           if (data.takenColors) setTakenColors(data.takenColors);
           const pin = urlInfo.password || null;
           setPendingJoin({ roomCode: urlInfo.roomCode, pin, spectate: false });
@@ -246,6 +274,7 @@ function App() {
       setRoomPassword(roomPwd);
       setURLRoom(roomCode, roomPwd);
       setGameTimeLimit(data.timeLimit || 180);
+      setAllowSpectators(data.allowSpectators !== false);
       const wd = buildWaitingData(data, data.roomId, data.timeLimit || 180);
       setWaitingPlayers(wd.players);
       setPhase('waiting');
@@ -256,6 +285,7 @@ function App() {
     const onSpectatorJoined = (data) => {
       setRoomCode(data.roomId);
       setIsSpectator(true);
+      setAllowSpectators(data.allowSpectators !== false);
       if (data.chatHistory) {
         setChatMessages(data.chatHistory);
       }
@@ -269,6 +299,11 @@ function App() {
         setPhase('gameOver');
         showToast(t('msg.spectating', data.roomId), '👁️');
       } else {
+        // WAITING — populate player list so slots render correctly
+        if (data.players) {
+          const wd = buildWaitingData(data, data.roomId, data.timeLimit);
+          setWaitingPlayers(wd.players);
+        }
         setPhase('waiting');
         showToast(t('msg.spectating', data.roomId), '👁️');
       }
@@ -283,6 +318,7 @@ function App() {
     const onPlayerLeft = (data) => {
       const wd = buildWaitingData(data, roomCodeRef.current, gameTimeLimitRef.current);
       setWaitingPlayers(wd.players);
+      if (data.hostId) setIsHost(data.hostId === socket.id);
       if (data.playerName) showToast(t('msg.leftRoom', data.playerName), '👋', 2500);
     };
 
@@ -380,6 +416,8 @@ function App() {
       if (data.playAgainStatus) {
         setPlayAgainStatus(data.playAgainStatus);
         showToast(t('gameover.playerLeft', data.playerName), '👋', 3000);
+      } else if (data.playerName) {
+        showToast(t('msg.playerDisconnected', data.playerName), '📡', 3000);
       }
     };
 
@@ -389,10 +427,21 @@ function App() {
       setIsDead(false);
       setKillFeed([]);
       setIsHost(data.hostId === socket.id);
+      setAllowSpectators(data.allowSpectators !== false);
       const wd = buildWaitingData(data, roomCodeRef.current, gameTimeLimitRef.current);
       setWaitingPlayers(wd.players);
       setPhase('waiting');
       showToast(t('msg.newGame'), '🎮');
+    };
+
+    const onSpectatorsToggled = (data) => {
+      setAllowSpectators(data.allowSpectators);
+    };
+
+    const onHostChanged = (data) => {
+      const amNewHost = data.hostId === socket.id;
+      setIsHost(amNewHost);
+      if (amNewHost) showToast(t('msg.youAreHost'), '👑', 3000);
     };
 
     const onChatMessage = (msg) => {
@@ -405,9 +454,21 @@ function App() {
     };
 
     const onRoomClosed = ()  => { resetToMenu(); showToast(t('msg.roomClosed'), '🚪'); };
-    const onKicked     = ()  => { resetToMenu(); showToast(t('msg.kicked'), '⛔'); };
+    const onKicked = (data) => {
+      resetToMenu();
+      if (data?.reason === 'spectators_disabled') {
+        showToast(t('msg.spectatorsDisabled'), '🚫');
+      } else {
+        showToast(t('msg.kicked'), '⛔');
+      }
+    };
     const onLeftRoom   = ()  => { /* silent */ };
     const onError      = (d) => { showToast(d.error || d.message || 'Error', '❌'); };
+    const onPlayerDisconnecting = (data) => {
+      if (data.playerName) {
+        showToast(t('msg.playerDisconnecting', data.playerName), '📡', 4000);
+      }
+    };
 
     // Reconnection recovery — re-request current room state
     const onReconnect = () => {
@@ -431,7 +492,10 @@ function App() {
     socket.on('gameOver',         onGameOver);
     socket.on('playAgainVote',    onPlayAgainVote);
     socket.on('playerDisconnected', onPlayerDisconnected);
+    socket.on('playerDisconnecting', onPlayerDisconnecting);
     socket.on('gameReset',        onGameReset);
+    socket.on('spectatorsToggled', onSpectatorsToggled);
+    socket.on('hostChanged',       onHostChanged);
     socket.on('chatMessage',      onChatMessage);
     socket.on('roomClosed',       onRoomClosed);
     socket.on('kicked',           onKicked);
@@ -451,7 +515,10 @@ function App() {
       socket.off('gameOver',         onGameOver);
       socket.off('playAgainVote',    onPlayAgainVote);
       socket.off('playerDisconnected', onPlayerDisconnected);
+      socket.off('playerDisconnecting', onPlayerDisconnecting);
       socket.off('gameReset',        onGameReset);
+      socket.off('spectatorsToggled', onSpectatorsToggled);
+      socket.off('hostChanged',       onHostChanged);
       socket.off('chatMessage',      onChatMessage);
       socket.off('roomClosed',       onRoomClosed);
       socket.off('kicked',           onKicked);
@@ -492,17 +559,23 @@ function App() {
       const data = await res.json();
       if (!data.exists) { showToast(t('msg.roomNotFound'), '❌'); return; }
 
-      if (data.hasPassword && !spectate) {
-        setPendingJoin(prev => ({ ...prev, roomCode: code, spectate }));
+      if (data.hasPassword) {
+        setPendingJoin(prev => ({ ...prev, roomCode: code, spectate: spectate || data.state === 'playing' }));
         if (data.takenColors) setTakenColors(data.takenColors);
         setLoginView('enterPin');
       } else if (spectate) {
+        if (!data.allowSpectators) { showToast(t('msg.spectatorsDisabled') || 'Spectators not allowed', '🚫'); return; }
         socketRef.current?.emit('joinGame', { gameId: code, isSpectating: true });
       } else {
-        setPendingJoin(prev => ({ ...prev, roomCode: code, spectate }));
-        setLoginView('enterName');
-        // Fetch taken colors
-        if (data.takenColors) setTakenColors(data.takenColors);
+        if (data.state === 'playing') {
+          if (!data.allowSpectators) { showToast(t('msg.spectatorsDisabled') || 'Spectators not allowed', '🚫'); return; }
+          // Room is in progress and no password — auto-spectate
+          socketRef.current?.emit('joinGame', { gameId: code, isSpectating: true });
+        } else {
+          setPendingJoin(prev => ({ ...prev, roomCode: code, spectate }));
+          setLoginView('enterName');
+          if (data.takenColors) setTakenColors(data.takenColors);
+        }
       }
     } catch {
       showToast(t('msg.serverUnreachable'), '❌');
@@ -547,6 +620,10 @@ function App() {
 
   const handleKickPlayer = useCallback((targetId) => {
     socketRef.current?.emit('kickPlayer', { targetId });
+  }, []);
+
+  const handleToggleSpectators = useCallback((allow) => {
+    socketRef.current?.emit('toggleSpectators', { allow });
   }, []);
 
   const handleBackToMenu = useCallback(() => {
@@ -770,10 +847,13 @@ function App() {
             roomPassword={roomPassword}
             players={waitingPlayers}
             isHost={isHost}
+            isSpectator={isSpectator}
             myId={myId}
             timeLimit={gameTimeLimit}
+            allowSpectators={allowSpectators}
             handleStartGame={handleStartGame}
             handleKickPlayer={handleKickPlayer}
+            handleToggleSpectators={handleToggleSpectators}
             handleBackToMenu={handleBackToMenu}
           />
         )}

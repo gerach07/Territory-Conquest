@@ -9,6 +9,15 @@ import { useI18n } from '../i18n/I18nContext';
 // Must match server RESPAWN_DELAY_MS (3000) / 1000
 const RESPAWN_SECONDS = 3;
 
+// Spectator camera limits
+const SPEC_ZOOM_MIN = 30 / (GRID_SIZE + 4); // fit whole grid
+const SPEC_ZOOM_MAX = 2;
+const clampSpecCam = (cam) => {
+  cam.zoom = Math.max(SPEC_ZOOM_MIN, Math.min(SPEC_ZOOM_MAX, cam.zoom));
+  cam.x   = Math.max(0, Math.min(GRID_SIZE, cam.x));
+  cam.y   = Math.max(0, Math.min(GRID_SIZE, cam.y));
+};
+
 /* ── Death overlay with countdown ── */
 function DeathOverlay({ deathTime, t }) {
   const [countdown, setCountdown] = useState(RESPAWN_SECONDS);
@@ -48,17 +57,147 @@ const GameCanvas = memo(({
   const myIdRef      = useRef(myId);
   const prevPlayersRef = useRef(null);
   const tickTimeRef    = useRef(0);
+  const isSpectatorRef = useRef(isSpectator);
 
   // Cache canvas 2D context
   const ctxRef = useRef(null);
+
+  // Spectator camera state
+  const [followPlayer, setFollowPlayer] = useState(null); // null = overview, playerId = follow
+  const specCamRef = useRef({ x: GRID_SIZE / 2, y: GRID_SIZE / 2, zoom: 1 }); // free camera
+  const isDraggingRef = useRef(false);
+  const dragStartRef = useRef({ x: 0, y: 0, camX: 0, camY: 0 });
+  const followPlayerRef = useRef(null);
 
   // Keep refs current
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
   useEffect(() => { myIdRef.current = myId; }, [myId]);
   useEffect(() => { prevPlayersRef.current = prevPlayers?.current; tickTimeRef.current = tickTime?.current; }, [prevPlayers, tickTime]);
+  useEffect(() => { followPlayerRef.current = followPlayer; }, [followPlayer]);
+  useEffect(() => { isSpectatorRef.current = isSpectator; }, [isSpectator]);
 
-  /* ── Keyboard input ── */
+  // Initialize spectator zoom to fit full grid
   useEffect(() => {
+    if (!isSpectator) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    // Fit entire grid: we need viewCells >= GRID_SIZE, zoom = 30 / viewCells
+    // viewCells = GRID_SIZE + margin, so zoom = 30 / (GRID_SIZE + 4)
+    specCamRef.current.zoom = SPEC_ZOOM_MIN;
+    specCamRef.current.x = GRID_SIZE / 2;
+    specCamRef.current.y = GRID_SIZE / 2;
+  }, [isSpectator]);
+
+  /* ── Spectator mouse/touch controls: drag to pan, wheel to zoom ── */
+  useEffect(() => {
+    if (!isSpectator) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const onWheel = (e) => {
+      e.preventDefault();
+      const cam = specCamRef.current;
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      cam.zoom *= delta;
+      clampSpecCam(cam);
+    };
+
+    const onMouseDown = (e) => {
+      if (e.button !== 0) return;
+      isDraggingRef.current = true;
+      const cam = specCamRef.current;
+      dragStartRef.current = { x: e.clientX, y: e.clientY, camX: cam.x, camY: cam.y };
+      canvas.style.cursor = 'grabbing';
+    };
+
+    const onMouseMove = (e) => {
+      if (!isDraggingRef.current) return;
+      const cam = specCamRef.current;
+      const viewCells = 30;
+      const cellSize = Math.max(canvas.width, canvas.height) / viewCells * cam.zoom;
+      const dx = (e.clientX - dragStartRef.current.x) / cellSize;
+      const dy = (e.clientY - dragStartRef.current.y) / cellSize;
+      cam.x = dragStartRef.current.camX - dx;
+      cam.y = dragStartRef.current.camY - dy;
+      clampSpecCam(cam);
+      // Unfollow when dragging
+      if (followPlayerRef.current !== null) {
+        setFollowPlayer(null);
+      }
+    };
+
+    const onMouseUp = () => {
+      isDraggingRef.current = false;
+      canvas.style.cursor = 'grab';
+    };
+
+    // Touch: pinch to zoom, single finger to pan
+    let touchStartDist = 0;
+    let touchStartZoom = 1;
+    let touchPanStart = null;
+
+    const onTouchStart = (e) => {
+      if (e.touches.length === 2) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        touchStartDist = Math.sqrt(dx * dx + dy * dy);
+        touchStartZoom = specCamRef.current.zoom;
+      } else if (e.touches.length === 1) {
+        const cam = specCamRef.current;
+        touchPanStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, camX: cam.x, camY: cam.y };
+      }
+    };
+
+    const onTouchMove = (e) => {
+      e.preventDefault();
+      if (e.touches.length === 2 && touchStartDist > 0) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const scale = dist / touchStartDist;
+        specCamRef.current.zoom = touchStartZoom * scale;
+        clampSpecCam(specCamRef.current);
+      } else if (e.touches.length === 1 && touchPanStart) {
+        const cam = specCamRef.current;
+        const viewCells = 30;
+        const cellSize = Math.max(canvas.width, canvas.height) / viewCells * cam.zoom;
+        const dx = (e.touches[0].clientX - touchPanStart.x) / cellSize;
+        const dy = (e.touches[0].clientY - touchPanStart.y) / cellSize;
+        cam.x = touchPanStart.camX - dx;
+        cam.y = touchPanStart.camY - dy;
+        clampSpecCam(cam);
+        if (followPlayerRef.current !== null) setFollowPlayer(null);
+      }
+    };
+
+    const onTouchEnd = () => {
+      touchStartDist = 0;
+      touchPanStart = null;
+    };
+
+    canvas.style.cursor = 'grab';
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    canvas.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    canvas.addEventListener('touchstart', onTouchStart, { passive: true });
+    canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+    canvas.addEventListener('touchend', onTouchEnd, { passive: true });
+
+    return () => {
+      canvas.removeEventListener('wheel', onWheel);
+      canvas.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      canvas.removeEventListener('touchstart', onTouchStart);
+      canvas.removeEventListener('touchmove', onTouchMove);
+      canvas.removeEventListener('touchend', onTouchEnd);
+    };
+  }, [isSpectator]);
+
+  /* ── Keyboard input (players only) ── */
+  useEffect(() => {
+    if (isSpectator) return;
     let lastDir = null;
     const keyMap = {
       ArrowUp: 'up', w: 'up', W: 'up',
@@ -79,10 +218,11 @@ const GameCanvas = memo(({
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [onDirectionChange]);
+  }, [onDirectionChange, isSpectator]);
 
-  /* ── Touch / swipe input (mobile) ── */
+  /* ── Touch / swipe input (mobile, players only) ── */
   useEffect(() => {
+    if (isSpectator) return;
     let startX = 0, startY = 0;
     const MIN_SWIPE = 35; // min px distance to register swipe (increased from 20)
 
@@ -116,7 +256,7 @@ const GameCanvas = memo(({
       window.removeEventListener('touchstart', onTouchStart);
       window.removeEventListener('touchend', onTouchEnd);
     };
-  }, [onDirectionChange]);
+  }, [onDirectionChange, isSpectator]);
 
   /* ── Canvas resize ── */
   const resize = useCallback(() => {
@@ -168,10 +308,39 @@ const GameCanvas = memo(({
       const me = gs.players?.find(p => p.id === myIdRef.current);
       const meInterp = me ? getInterp(me) : null;
 
-      const camX = meInterp ? meInterp.ix : GRID_SIZE / 2;
-      const camY = meInterp ? meInterp.iy : GRID_SIZE / 2;
-      const viewCells = 30;
-      const cellSize  = Math.max(w, h) / viewCells;
+      // Camera: spectator uses free cam or follows a player
+      let camX, camY, viewCells, cellSize;
+      const specCam = specCamRef.current;
+      const followId = followPlayerRef.current;
+      // Use the isSpectator prop (captured via closure) — not socket ID heuristics
+      const isSpecMode = isSpectatorRef.current;
+
+      if (isSpecMode) {
+        // Spectator mode camera
+        if (followId) {
+          const followed = gs.players?.find(p => p.id === followId);
+          if (followed && followed.alive) {
+            const fi = getInterp(followed);
+            camX = fi.ix;
+            camY = fi.iy;
+          } else {
+            camX = specCam.x;
+            camY = specCam.y;
+          }
+        } else {
+          camX = specCam.x;
+          camY = specCam.y;
+        }
+        viewCells = 30 / specCam.zoom;
+        cellSize = Math.max(w, h) / viewCells;
+      } else {
+        // Player mode camera
+        camX = meInterp ? meInterp.ix : GRID_SIZE / 2;
+        camY = meInterp ? meInterp.iy : GRID_SIZE / 2;
+        viewCells = 30;
+        cellSize  = Math.max(w, h) / viewCells;
+      }
+
       const ox = w / 2 - camX * cellSize;
       const oy = h / 2 - camY * cellSize;
 
@@ -366,6 +535,68 @@ const GameCanvas = memo(({
           className="fixed bottom-4 left-4 z-20 px-3 py-2 rounded-xl bg-red-900/40 hover:bg-red-800/50 border border-red-500/20 text-red-400 text-xs font-medium transition-all backdrop-blur-sm">
           🚪 {t('game.leaveGame')}
         </button>
+      )}
+
+      {/* ── Spectator controls ── */}
+      {isSpectator && (
+        <>
+          {/* Spectator badge */}
+          <div className="fixed top-14 left-3 z-20">
+            <div className="glass-card px-3 py-1.5 flex items-center gap-2">
+              <span className="text-sm">👁️</span>
+              <span className="text-xs font-bold text-purple-300">{t('spectator.watching')}</span>
+            </div>
+          </div>
+
+          {/* Player switcher */}
+          <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-20">
+            <div className="glass-card px-3 py-2 flex items-center gap-2 max-w-[90vw] overflow-x-auto">
+              <button
+                onClick={() => {
+                  setFollowPlayer(null);
+                  specCamRef.current = { x: GRID_SIZE / 2, y: GRID_SIZE / 2, zoom: SPEC_ZOOM_MIN };
+                }}
+                className={`shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  followPlayer === null
+                    ? 'bg-purple-500/30 text-purple-200 border border-purple-400/40'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'
+                }`}
+              >
+                🗺️ {t('spectator.overview')}
+              </button>
+              {sorted.filter(p => p.alive).map(p => {
+                const color = PLAYER_COLORS[p.colorIndex] || '#888';
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => { setFollowPlayer(p.id); specCamRef.current.zoom = 1; }}
+                    className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                      followPlayer === p.id
+                        ? 'bg-slate-700/60 text-white border border-slate-500/40'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'
+                    }`}
+                  >
+                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />
+                    <span className="truncate max-w-[5rem]">{p.name}</span>
+                    <span className="text-slate-500 font-mono text-[0.6rem]">{p.score || 0}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Zoom controls */}
+          <div className="fixed bottom-20 right-3 z-20 flex flex-col gap-1">
+            <button
+              onClick={() => { specCamRef.current.zoom *= 1.3; clampSpecCam(specCamRef.current); }}
+              className="glass-card w-9 h-9 flex items-center justify-center text-lg font-bold text-slate-300 hover:text-white transition"
+            >+</button>
+            <button
+              onClick={() => { specCamRef.current.zoom *= 0.7; clampSpecCam(specCamRef.current); }}
+              className="glass-card w-9 h-9 flex items-center justify-center text-lg font-bold text-slate-300 hover:text-white transition"
+            >−</button>
+          </div>
+        </>
       )}
     </div>
   );
