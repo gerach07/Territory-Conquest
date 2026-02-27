@@ -8,54 +8,67 @@ import { SOCKET_URL, LOCAL_SERVER_URL, PUBLIC_SERVER_URL } from '../constants';
 
 const LOCAL_TIMEOUT_MS = 2500;
 
+/**
+ * Determine whether we're running on localhost (dev) or a remote host (production).
+ * When on a remote host, skip the local-server probe entirely to avoid
+ * ERR_CONNECTION_REFUSED console errors and wasted time.
+ */
+const isLocalhost = typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' ||
+   window.location.hostname === '127.0.0.1' ||
+   window.location.hostname === '[::1]');
+
 const useSocket = () => {
   const [socket,      setSocket]      = useState(null);
   const [isConnected, setIsConnected] = useState(false);
-  const [serverUrl,   setServerUrl]   = useState(SOCKET_URL || LOCAL_SERVER_URL);
+  const [serverUrl,   setServerUrl]   = useState(
+    SOCKET_URL || (isLocalhost ? LOCAL_SERVER_URL : PUBLIC_SERVER_URL)
+  );
   const socketRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
 
-    // If a URL was explicitly set at build time, use it directly — no fallback logic
-    if (SOCKET_URL) {
-      const s = io(SOCKET_URL, {
+    /** Helper to connect with full reconnection support */
+    const connectDirect = (url) => {
+      const s = io(url, {
         reconnection: true,
         reconnectionDelay: 1000,
         reconnectionDelayMax: 5000,
         reconnectionAttempts: Infinity,
       });
-      s.on('connect', () => !cancelled && setIsConnected(true));
-      s.on('disconnect', () => !cancelled && setIsConnected(false));
+      s.on('connect',    () => { if (!cancelled) { setIsConnected(true);  } });
+      s.on('disconnect', () => { if (!cancelled) { setIsConnected(false); } });
       socketRef.current = s;
       setSocket(s);
+      setServerUrl(url);
+      return s;
+    };
+
+    // 1) Explicit build-time URL — use it directly
+    if (SOCKET_URL) {
+      const s = connectDirect(SOCKET_URL);
       return () => { cancelled = true; s.disconnect(); };
     }
 
-    // --- Local-first, then public fallback ---
+    // 2) Remote host — go straight to public Railway server (no localhost probe)
+    if (!isLocalhost) {
+      const s = connectDirect(PUBLIC_SERVER_URL);
+      return () => { cancelled = true; s.disconnect(); };
+    }
+
+    // 3) Localhost — try local first, then fall back to public
     let fallbackTimer;
     let localConnected = false;
+    let switchedToPublic = false;
 
     const switchToPublic = () => {
-      if (cancelled) return;
-      const pub = io(PUBLIC_SERVER_URL, {
-        reconnection: true,
-        reconnectionDelay: 1000,
-        reconnectionDelayMax: 5000,
-        reconnectionAttempts: Infinity,
-      });
-      pub.on('connect', () => {
-        if (!cancelled) {
-          setServerUrl(PUBLIC_SERVER_URL);
-          setIsConnected(true);
-          socketRef.current = pub;
-          setSocket(pub);
-        }
-      });
-      pub.on('disconnect', () => { if (!cancelled) setIsConnected(false); });
+      if (cancelled || switchedToPublic) return;
+      switchedToPublic = true;
+      local.disconnect();
+      connectDirect(PUBLIC_SERVER_URL);
     };
 
-    /* Try local first */
     const local = io(LOCAL_SERVER_URL, {
       reconnection: false,
       timeout: LOCAL_TIMEOUT_MS,
@@ -65,12 +78,12 @@ const useSocket = () => {
       if (cancelled) { local.disconnect(); return; }
       clearTimeout(fallbackTimer);
       localConnected = true;
-      setServerUrl(LOCAL_SERVER_URL);
       local.io.reconnection(true);
       local.io.reconnectionDelay(1000);
       local.io.reconnectionDelayMax(5000);
       local.io.reconnectionAttempts(Infinity);
       setIsConnected(true);
+      setServerUrl(LOCAL_SERVER_URL);
       socketRef.current = local;
       setSocket(local);
     });
