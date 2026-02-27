@@ -805,18 +805,24 @@ function App() {
 
                 {/* Detail rows */}
                 <div className="space-y-2">
+                  {serverInfo.uptime != null && (
                   <div className="flex justify-between items-center">
                     <span className="text-slate-500">{t('serverInfo.uptime')}</span>
                     <span className="text-slate-300 font-mono bg-slate-800/50 px-2 py-0.5 rounded-md">{formatUptime(serverInfo.uptime)}</span>
                   </div>
+                  )}
+                  {serverInfo.nodeVersion && (
                   <div className="flex justify-between items-center">
                     <span className="text-slate-500">{t('serverInfo.node')}</span>
                     <span className="text-slate-300 font-mono bg-slate-800/50 px-2 py-0.5 rounded-md">{serverInfo.nodeVersion}</span>
                   </div>
+                  )}
+                  {serverInfo.memoryMB != null && (
                   <div className="flex justify-between items-center">
                     <span className="text-slate-500">{t('serverInfo.memory')}</span>
                     <span className="text-slate-300 font-mono bg-slate-800/50 px-2 py-0.5 rounded-md">{serverInfo.memoryMB}MB</span>
                   </div>
+                  )}
                 </div>
               </div>
             )}

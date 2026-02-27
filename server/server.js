@@ -689,35 +689,27 @@ io.on('connection', (socket) => {
 // ============================================================================
 
 app.get('/health', (req, res) => {
-  const base = {
+  res.json({
     status: 'ok',
     version: pkg.version,
     rooms: Object.keys(rooms).length,
     players: io.engine?.clientsCount || 0,
-  };
-  // Only include internal details in development
-  if (process.env.NODE_ENV === 'development') {
-    base.uptime = process.uptime();
-    base.nodeVersion = process.version;
-    base.memoryMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-  }
-  res.json(base);
+    uptime: Math.floor(process.uptime()),
+    nodeVersion: process.version,
+    memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+  });
 });
 
 app.get('/version', (req, res) => {
-  const base = {
+  res.json({
     name: pkg.name,
     version: pkg.version,
     activeRooms: Object.keys(rooms).length,
     connectedSockets: io.engine?.clientsCount || 0,
-  };
-  // Only include internal details in development
-  if (process.env.NODE_ENV === 'development') {
-    base.node = process.version;
-    base.uptime = Math.floor(process.uptime());
-    base.memoryMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-  }
-  res.json(base);
+    node: process.version,
+    uptime: Math.floor(process.uptime()),
+    memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+  });
 });
 
 app.get('/rooms', (req, res) => {
