@@ -22,16 +22,23 @@ import ConnectionOverlay from './components/ConnectionOverlay';
 
 // Direction vectors for prediction calculations
 const DIR_V = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+const MAX_LOCAL_EXTRAP_CELLS = 2.0;
+const MAX_CORRECTION_ABS = 1.25;
+const MAX_CORRECTION_DIST = 2.2;
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
 
 // Calculate predicted position from a prediction state
 function getPredictedPos(pred, now) {
   if (!pred) return null;
   const elapsed = now - pred.startTime;
-  const cells = elapsed / TICK_MS;
+  const cells = Math.min(elapsed / TICK_MS, MAX_LOCAL_EXTRAP_CELLS);
   const dv = DIR_V[pred.direction] || [0, 0];
   return {
-    x: Math.max(0, Math.min(GRID_SIZE - 1, pred.startX + dv[0] * cells)),
-    y: Math.max(0, Math.min(GRID_SIZE - 1, pred.startY + dv[1] * cells)),
+    x: clamp(pred.startX + dv[0] * cells, 0, GRID_SIZE - 1),
+    y: clamp(pred.startY + dv[1] * cells, 0, GRID_SIZE - 1),
   };
 }
 
@@ -148,6 +155,7 @@ function App() {
   // Interpolation: store previous player positions + tick timestamp
   const prevPlayersRef = useRef(null);   // positions at tick N-1
   const tickTimeRef    = useRef(0);      // when tick N arrived (performance.now())
+  const lastServerSeqRef = useRef(0);
 
   // Client-side prediction: smooth movement on high-latency connections
   // When user changes direction, we predict locally and ignore server ticks
@@ -360,6 +368,9 @@ function App() {
       const gs = processGameState(data.gameState, data.grid, null);
       gameStateRef.current = gs; // sync ref immediately (before React render)
       setGameState(gs);
+      lastServerSeqRef.current = 0;
+      localPredictionRef.current = null;
+      correctionRef.current = { x: 0, y: 0 };
       setGameTimeLimit(data.timeLimit || 180);
       setPhase('game');
       setIsDead(false);
@@ -369,6 +380,14 @@ function App() {
     };
 
     const onGameState = (state) => {
+      const seq = Number.isFinite(state?.seq) ? state.seq : null;
+      if (seq !== null && seq <= lastServerSeqRef.current) {
+        return;
+      }
+      if (seq !== null) {
+        lastServerSeqRef.current = seq;
+      }
+
       const prevGs = gameStateRef.current;
       const myId = socketRef.current?.id;
       const now = performance.now();
@@ -400,9 +419,12 @@ function App() {
             if (serverMe.direction === prediction.direction) {
               // Server confirmed our direction! Adopt server position.
               const visualPos = getPredictedPos(prediction, now);
+              const rawX = (visualPos.x - serverMe.x);
+              const rawY = (visualPos.y - serverMe.y);
+              const dist = Math.hypot(rawX, rawY);
               correctionRef.current = {
-                x: (visualPos.x - serverMe.x),
-                y: (visualPos.y - serverMe.y),
+                x: dist > MAX_CORRECTION_DIST ? 0 : clamp(rawX, -MAX_CORRECTION_ABS, MAX_CORRECTION_ABS),
+                y: dist > MAX_CORRECTION_DIST ? 0 : clamp(rawY, -MAX_CORRECTION_ABS, MAX_CORRECTION_ABS),
               };
               localPredictionRef.current = {
                 startX: serverMe.x,
@@ -431,9 +453,12 @@ function App() {
             if (prediction) {
               const visualPos = getPredictedPos(prediction, now);
               const oldCorr = correctionRef.current;
+              const rawX = (visualPos.x + (oldCorr?.x || 0)) - serverMe.x;
+              const rawY = (visualPos.y + (oldCorr?.y || 0)) - serverMe.y;
+              const dist = Math.hypot(rawX, rawY);
               correctionRef.current = {
-                x: (visualPos.x + (oldCorr?.x || 0)) - serverMe.x,
-                y: (visualPos.y + (oldCorr?.y || 0)) - serverMe.y,
+                x: dist > MAX_CORRECTION_DIST ? 0 : clamp(rawX, -MAX_CORRECTION_ABS, MAX_CORRECTION_ABS),
+                y: dist > MAX_CORRECTION_DIST ? 0 : clamp(rawY, -MAX_CORRECTION_ABS, MAX_CORRECTION_ABS),
               };
             }
             localPredictionRef.current = {
@@ -474,6 +499,8 @@ function App() {
             if (evt.victim === socket.id) {
               setIsDead(true);
               setDeathTime(Date.now());
+              localPredictionRef.current = null;
+              correctionRef.current = { x: 0, y: 0 };
               playSound('death');
             } else {
               playSound('kill');
@@ -482,6 +509,8 @@ function App() {
           if (evt.type === 'respawn' && evt.playerId === socket.id) {
             setIsDead(false);
             setDeathTime(null);
+            localPredictionRef.current = null;
+            correctionRef.current = { x: 0, y: 0 };
           }
           if (evt.type === 'forfeit' || evt.type === 'leave') {
             const fName = evt.playerName || 'Player';
@@ -495,6 +524,8 @@ function App() {
     };
 
     const onGameOver = (data) => {
+      localPredictionRef.current = null;
+      correctionRef.current = { x: 0, y: 0 };
       setGameOverData(data);
       setPhase('gameOver');
       setPlayAgainPending(false);
@@ -525,6 +556,9 @@ function App() {
     const onGameReset = (data) => {
       gameStateRef.current = null;
       setGameState(null);
+      lastServerSeqRef.current = 0;
+      localPredictionRef.current = null;
+      correctionRef.current = { x: 0, y: 0 };
       setGameOverData(null);
       setIsDead(false);
       setKillFeed([]);

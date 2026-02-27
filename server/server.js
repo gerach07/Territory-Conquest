@@ -158,6 +158,7 @@ function startGameLoop(roomId) {
 
     // Periodically include full grid so clients can self-correct drift
     tickCount++;
+    state.seq = tickCount;
     if (tickCount % FULL_GRID_SYNC_TICKS === 0) {
       state.fullGrid = room.getFullGridForClient();
     }
