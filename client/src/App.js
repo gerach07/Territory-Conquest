@@ -156,9 +156,10 @@ function App() {
 
   /* ── Server health polling ── */
   useEffect(() => {
+    if (!serverUrl) return;
     const poll = async () => {
       try {
-        const res = await fetch('/health');
+        const res = await fetch(`${serverUrl}/health`);
         const data = await res.json();
         setServerInfo(data);
       } catch { setServerInfo(null); }
@@ -166,7 +167,7 @@ function App() {
     poll();
     const id = setInterval(poll, 15000);
     return () => clearInterval(id);
-  }, []);
+  }, [serverUrl]);
 
   /* ── URL room code ── */
   useEffect(() => {
@@ -437,7 +438,7 @@ function App() {
   /* ── Join / Create ── */
   const handleJoinRoom = useCallback(async (code, spectate) => {
     try {
-      const res  = await fetch(`/rooms/${code}`);
+      const res  = await fetch(`${serverUrl}/rooms/${code}`);
       const data = await res.json();
       if (!data.exists) { showToast(t('msg.roomNotFound'), '❌'); return; }
 
@@ -455,7 +456,7 @@ function App() {
     } catch {
       showToast(t('msg.serverUnreachable'), '❌');
     }
-  }, [showToast, t]);
+  }, [showToast, t, serverUrl]);
 
   const handleSpectate = useCallback((code, pin) => {
     socketRef.current?.emit('joinGame', { gameId: code, password: pin || undefined, isSpectating: true });

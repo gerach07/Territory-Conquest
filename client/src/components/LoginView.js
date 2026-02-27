@@ -48,7 +48,7 @@ const LoginView = memo(({
   const fetchRooms = useCallback(async () => {
     setRoomsLoading(true);
     try {
-      const res  = await fetch('/rooms');
+      const res  = await fetch(`${serverUrl}/rooms`);
       const data = await res.json();
       setRooms(data.rooms || []);
     } catch { setRooms([]); }
