@@ -11,7 +11,7 @@ import { useI18n } from './i18n/I18nContext';
 import { buildWaitingData, processGameState, formatUptime, getRoomFromURL, setURLRoom } from './utils/gameHelpers';
 import { playSound, setSoundEnabled } from './utils/sounds';
 import { playPhaseMusic } from './utils/music';
-import { TICK_MS } from './constants';
+import { TICK_MS, GRID_SIZE } from './constants';
 
 import LoginView        from './components/LoginView';
 import WaitingRoom      from './components/WaitingRoom';
@@ -19,6 +19,21 @@ import GameCanvas       from './components/GameCanvas';
 import GameOver         from './components/GameOver';
 import ChatBox          from './components/ChatBox';
 import ConnectionOverlay from './components/ConnectionOverlay';
+
+// Direction vectors for prediction calculations
+const DIR_V = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+
+// Calculate predicted position from a prediction state
+function getPredictedPos(pred, now) {
+  if (!pred) return null;
+  const elapsed = now - pred.startTime;
+  const cells = elapsed / TICK_MS;
+  const dv = DIR_V[pred.direction] || [0, 0];
+  return {
+    x: Math.max(0, Math.min(GRID_SIZE - 1, pred.startX + dv[0] * cells)),
+    y: Math.max(0, Math.min(GRID_SIZE - 1, pred.startY + dv[1] * cells)),
+  };
+}
 
 /* ── Floating bubble background ───────────────────────────── */
 const BUBBLE_COUNT = 14;
@@ -354,73 +369,88 @@ function App() {
     };
 
     const onGameState = (state) => {
-      // Snapshot previous positions for interpolation
       const prevGs = gameStateRef.current;
       const myId = socketRef.current?.id;
-      const prediction = localPredictionRef.current;
+      const now = performance.now();
 
+      // Snapshot previous positions for OTHER players' interpolation
       if (prevGs?.players) {
         const snap = {};
         prevGs.players.forEach(p => { snap[p.id] = { x: p.x, y: p.y }; });
         prevPlayersRef.current = snap;
       }
-      tickTimeRef.current = performance.now();
+      tickTimeRef.current = now;
 
-      // processGameState now handles state.fullGrid (periodic full sync)
-      // as well as state.gridChanges (incremental)
       const gs = processGameState(state, null, prevGs?.grid);
 
-      // ── Client-side prediction reconciliation ──
-      // When we have an active local prediction (pending direction change),
-      // check if the server has confirmed our direction. Until it does,
-      // keep our predicted direction + position for the local player to
-      // avoid jarring snap-back from stale server ticks.
-      if (prediction && gs.players && myId) {
+      // ── Always-on prediction for local player ──
+      // The local player is ALWAYS rendered via prediction (dead-reckoning).
+      // On each server tick we update the prediction origin to the server's
+      // authoritative position, with a small correction offset for visual
+      // continuity. If there's a pending direction change, we ignore stale
+      // ticks (where the server still shows the old direction).
+      if (gs.players && myId) {
         const meIdx = gs.players.findIndex(p => p.id === myId);
         if (meIdx !== -1) {
           const serverMe = gs.players[meIdx];
-          const elapsed = performance.now() - prediction.startTime;
+          const prediction = localPredictionRef.current;
 
-          if (serverMe.direction === prediction.direction) {
-            // Server caught up! Accept server position.
-            // Calculate smooth correction offset: difference between
-            // where we were visually predicting and where server says we are.
-            const predCells = elapsed / TICK_MS;
-            const DIR_V = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
-            const dv = DIR_V[prediction.direction] || [0, 0];
-            const predX = prediction.startX + dv[0] * predCells;
-            const predY = prediction.startY + dv[1] * predCells;
-            correctionRef.current = {
-              x: predX - serverMe.x,
-              y: predY - serverMe.y,
+          if (prediction && prediction.pendingDir) {
+            // We have a pending direction change the server hasn't confirmed
+            if (serverMe.direction === prediction.direction) {
+              // Server confirmed our direction! Adopt server position.
+              const visualPos = getPredictedPos(prediction, now);
+              correctionRef.current = {
+                x: (visualPos.x - serverMe.x),
+                y: (visualPos.y - serverMe.y),
+              };
+              localPredictionRef.current = {
+                startX: serverMe.x,
+                startY: serverMe.y,
+                direction: serverMe.direction,
+                startTime: now,
+                pendingDir: false,
+              };
+            } else if (now - prediction.startTime < 800) {
+              // Stale tick — server hasn't processed our change yet.
+              // Keep predicting locally; don't update local player from server.
+            } else {
+              // Safety timeout (800ms) — accept server state to avoid desyncing
+              localPredictionRef.current = {
+                startX: serverMe.x,
+                startY: serverMe.y,
+                direction: serverMe.direction,
+                startTime: now,
+                pendingDir: false,
+              };
+              correctionRef.current = { x: 0, y: 0 };
+            }
+          } else if (serverMe.alive) {
+            // No pending direction change — seamlessly adopt server position.
+            // Calculate correction for visual continuity.
+            if (prediction) {
+              const visualPos = getPredictedPos(prediction, now);
+              const oldCorr = correctionRef.current;
+              correctionRef.current = {
+                x: (visualPos.x + (oldCorr?.x || 0)) - serverMe.x,
+                y: (visualPos.y + (oldCorr?.y || 0)) - serverMe.y,
+              };
+            }
+            localPredictionRef.current = {
+              startX: serverMe.x,
+              startY: serverMe.y,
+              direction: serverMe.direction,
+              startTime: now,
+              pendingDir: false,
             };
-            localPredictionRef.current = null;
-          } else if (elapsed < 600) {
-            // Server hasn't processed our direction change yet.
-            // Keep our predicted direction and position to avoid snap-back.
-            const updated = [...gs.players];
-            updated[meIdx] = {
-              ...serverMe,
-              direction: prediction.direction,
-              x: prediction.startX,
-              y: prediction.startY,
-            };
-            gs.players = updated;
-            // Keep prevPlayers from prediction origin so extrapolation works
-            prevPlayersRef.current[myId] = { x: prediction.startX, y: prediction.startY };
-            // Don't reset tickTime for local player - keep original prediction time
-            // so extrapolation continues smoothly
-            tickTimeRef.current = prediction.startTime - 100;
           } else {
-            // Safety timeout: accept server position after 600ms
+            // Player is dead — clear prediction
             localPredictionRef.current = null;
             correctionRef.current = { x: 0, y: 0 };
           }
         }
       }
 
-      // CRITICAL: update ref synchronously so the *next* event in the same
-      // microtask batch sees the correct previous grid.
       gameStateRef.current = gs;
       setGameState(gs);
 
@@ -738,7 +768,6 @@ function App() {
   const handleDirectionChange = useCallback((dir) => {
     socketRef.current?.emit('changeDirection', { direction: dir });
 
-    // Client-side prediction: immediately update own player direction
     const gs = gameStateRef.current;
     if (!gs?.players) return;
     const meIdx = gs.players.findIndex(p => p.id === socketRef.current?.id);
@@ -750,26 +779,44 @@ function App() {
     if (opposites[me.direction] === dir) return; // server would reject this
     if (me.direction === dir) return; // already heading that way
 
+    // Update game state direction locally
     const updated = [...gs.players];
     updated[meIdx] = { ...me, direction: dir };
     const newGs = { ...gs, players: updated };
     gameStateRef.current = newGs;
     setGameState(newGs);
 
-    // Start local prediction: track where prediction began so GameCanvas
-    // can smoothly move the player in the new direction independent of
-    // server ticks. This eliminates the 100ms dead zone AND prevents
-    // snap-back when stale server ticks arrive.
-    localPredictionRef.current = {
-      startX: me.x,
-      startY: me.y,
-      direction: dir,
-      startTime: performance.now(),
-    };
+    // Calculate prediction start from CURRENT visual position
+    // (not stale server position) — this is critical for chained
+    // direction changes (e.g., UP then quickly RIGHT)
+    const now = performance.now();
+    const prediction = localPredictionRef.current;
+    let startX, startY;
+    if (prediction) {
+      // Use where we're visually right now
+      const pos = getPredictedPos(prediction, now);
+      const corr = correctionRef.current;
+      // Round to nearest integer — server works in discrete cells
+      startX = Math.round(pos.x + (corr?.x || 0));
+      startY = Math.round(pos.y + (corr?.y || 0));
+      startX = Math.max(0, Math.min(GRID_SIZE - 1, startX));
+      startY = Math.max(0, Math.min(GRID_SIZE - 1, startY));
+    } else {
+      startX = me.x;
+      startY = me.y;
+    }
 
-    // Reset interpolation so extrapolation starts immediately
-    prevPlayersRef.current = { ...prevPlayersRef.current, [me.id]: { x: me.x, y: me.y } };
-    tickTimeRef.current = performance.now() - 100; // t_lerp starts > 1.0 → immediate extrapolation
+    // Clear correction — we're committing to a new prediction origin
+    correctionRef.current = { x: 0, y: 0 };
+
+    // Start new prediction from visual position in the new direction
+    localPredictionRef.current = {
+      startX,
+      startY,
+      direction: dir,
+      startTime: now,
+      pendingDir: true, // waiting for server to confirm this direction
+    };
   }, []);
 
   const handleLeaveGame = useCallback(() => {

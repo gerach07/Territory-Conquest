@@ -112,11 +112,12 @@ const GameCanvas = memo(({
   const animFrameRef = useRef(null);
   const gameStateRef = useRef(gameState);
   const myIdRef      = useRef(myId);
-  const prevPlayersRef = useRef(null);
-  const tickTimeRef    = useRef(0);
   const isSpectatorRef = useRef(isSpectator);
-  const localPredictionRef = useRef(null);
-  const correctionRef = useRef({ x: 0, y: 0 });
+  // NOTE: prevPlayers, tickTime, localPrediction, correction are React ref
+  // objects passed from App.js. We read .current directly in the render loop
+  // (ref objects have stable identity, so .current always gives latest value).
+  // Previous approach of copying into local refs via useEffect was broken
+  // because ref dependencies never change, so the effect only ran once.
 
   // Cache canvas 2D context
   const ctxRef = useRef(null);
@@ -147,7 +148,6 @@ const GameCanvas = memo(({
     gridDirtyRef.current = true;
   }, [gameState]);
   useEffect(() => { myIdRef.current = myId; }, [myId]);
-  useEffect(() => { prevPlayersRef.current = prevPlayers?.current; tickTimeRef.current = tickTime?.current; localPredictionRef.current = localPrediction?.current; correctionRef.current = correction?.current || { x: 0, y: 0 }; }, [prevPlayers, tickTime, localPrediction, correction]);
   useEffect(() => { followPlayerRef.current = followPlayer; }, [followPlayer]);
   useEffect(() => { isSpectatorRef.current = isSpectator; }, [isSpectator]);
 
@@ -376,52 +376,49 @@ const GameCanvas = memo(({
       const w = canvas.width;
       const h = canvas.height;
 
-      // Interpolation factor: how far between prev tick and next tick
-      // Allow values > 1.0 for extrapolation (smooth movement prediction)
+      // Interpolation factor for OTHER players (local player uses prediction)
       const now = performance.now();
-      const elapsed = now - (tickTimeRef.current || now);
-      const t_lerp = Math.min(elapsed / TICK_MS, 3.5); // allow up to 3.5 ticks of extrapolation for high-latency
-      const prev = prevPlayersRef.current || {};
+      const tickT = tickTime?.current || now;
+      const elapsed = now - tickT;
+      const t_lerp = Math.min(elapsed / TICK_MS, 3.5);
+      const prev = prevPlayers?.current || {};
 
       const me = gs.players?.find(p => p.id === myIdRef.current);
 
-      // ── Client-side prediction for local player ──
-      // When localPrediction is active, position the local player based on
-      // predicted movement since the key press rather than server interpolation.
-      // This eliminates the dead zone and prevents snap-back.
-      const prediction = localPredictionRef.current;
-      const corr = correctionRef.current;
+      // ── Always-on prediction for local player ──
+      // localPrediction.current is kept active during the entire game.
+      // It provides smooth 60fps movement independent of server tick rate.
+      const prediction = localPrediction?.current;
+      const corr = correction?.current;
       let meInterp;
       if (me && prediction && me.alive) {
-        // Calculate predicted position: cells moved = time since key press / tick interval
+        // Calculate predicted position from prediction origin
         const predElapsed = now - prediction.startTime;
         const cellsMoved = predElapsed / TICK_MS;
         const dv = DIR_VECTORS[prediction.direction];
         if (dv) {
+          let ix = prediction.startX + dv.dx * cellsMoved;
+          let iy = prediction.startY + dv.dy * cellsMoved;
+          // Apply & decay correction offset for smooth reconciliation
+          if (corr && (Math.abs(corr.x) > 0.01 || Math.abs(corr.y) > 0.01)) {
+            ix += corr.x;
+            iy += corr.y;
+            corr.x *= 0.88;
+            corr.y *= 0.88;
+          } else if (corr) {
+            corr.x = 0;
+            corr.y = 0;
+          }
           meInterp = {
-            ix: prediction.startX + dv.dx * cellsMoved,
-            iy: prediction.startY + dv.dy * cellsMoved,
+            ix: Math.max(0, Math.min(GRID_SIZE - 1, ix)),
+            iy: Math.max(0, Math.min(GRID_SIZE - 1, iy)),
           };
-          // Clamp to grid bounds
-          meInterp.ix = Math.max(0, Math.min(GRID_SIZE - 1, meInterp.ix));
-          meInterp.iy = Math.max(0, Math.min(GRID_SIZE - 1, meInterp.iy));
         } else {
           meInterp = { ix: me.x, iy: me.y };
         }
       } else if (me) {
-        // Normal interpolation/extrapolation (no active prediction)
+        // Fallback: normal interpolation (no prediction active, e.g. just spawned)
         meInterp = getInterpPos(me, prev, t_lerp);
-        // Apply smooth correction offset (decays each frame)
-        if (corr && (Math.abs(corr.x) > 0.01 || Math.abs(corr.y) > 0.01)) {
-          meInterp.ix += corr.x;
-          meInterp.iy += corr.y;
-          // Decay correction by ~15% each frame (~60fps → fades in ~150ms)
-          corr.x *= 0.85;
-          corr.y *= 0.85;
-        } else if (corr) {
-          corr.x = 0;
-          corr.y = 0;
-        }
       } else {
         meInterp = null;
       }
@@ -609,6 +606,7 @@ const GameCanvas = memo(({
 
     animFrameRef.current = requestAnimationFrame(render);
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lightTheme]);
 
   /* ── Leaderboard data (memoized with stable key to avoid re-sorting every frame) ── */
