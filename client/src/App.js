@@ -356,11 +356,11 @@ function App() {
       }
       tickTimeRef.current = performance.now();
 
+      // processGameState now handles state.fullGrid (periodic full sync)
+      // as well as state.gridChanges (incremental)
       const gs = processGameState(state, null, prevGs?.grid);
       // CRITICAL: update ref synchronously so the *next* event in the same
-      // microtask batch sees the correct previous grid.  Without this,
-      // bundled network events all read the same stale grid and gridChanges
-      // from earlier ticks are silently lost.
+      // microtask batch sees the correct previous grid.
       gameStateRef.current = gs;
       setGameState(gs);
 
@@ -493,6 +493,33 @@ function App() {
       }
     };
 
+    // Handle full grid sync (server sends periodically or on request)
+    const onFullGridSync = (data) => {
+      if (!data?.grid) return;
+      const prevGs = gameStateRef.current;
+      if (!prevGs) return;
+      // Rebuild complete grid from server's authoritative flat array
+      const newGrid = [];
+      const GRID = 80; // GRID_SIZE
+      for (let y = 0; y < GRID; y++) {
+        newGrid[y] = [];
+        for (let x = 0; x < GRID; x++) {
+          newGrid[y][x] = data.grid[y * GRID + x];
+        }
+      }
+      const gs = { ...prevGs, grid: newGrid };
+      gameStateRef.current = gs;
+      setGameState(gs);
+    };
+
+    // Request full grid when tab regains visibility (prevents drift when backgrounded)
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && phaseRef.current === 'game') {
+        socket.emit('requestFullGrid');
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
     socket.on('connect',          onConnect);
     socket.on('gameJoined',       onGameJoined);
     socket.on('spectatorJoined',  onSpectatorJoined);
@@ -513,6 +540,7 @@ function App() {
     socket.on('kicked',           onKicked);
     socket.on('leftRoom',         onLeftRoom);
     socket.on('error',            onError);
+    socket.on('fullGridSync',     onFullGridSync);
     socket.io.on('reconnect',     onReconnect);
 
     return () => {
@@ -536,7 +564,9 @@ function App() {
       socket.off('kicked',           onKicked);
       socket.off('leftRoom',         onLeftRoom);
       socket.off('error',            onError);
+      socket.off('fullGridSync',     onFullGridSync);
       socket.io.off('reconnect',     onReconnect);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socket, showToast, t]);

@@ -32,6 +32,8 @@ const useSocket = () => {
     /** Helper to connect with full reconnection support */
     const connectDirect = (url) => {
       const s = io(url, {
+        transports: ['websocket'],   // Skip HTTP polling — go straight to WebSocket
+        upgrade: false,              // Don't fall back to polling
         reconnection: true,
         reconnectionDelay: 1000,
         reconnectionDelayMax: 5000,

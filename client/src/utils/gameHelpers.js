@@ -119,8 +119,18 @@ export function processGameState(state, flatGrid, prevGrid) {
     }
   }
 
-  // Apply incremental grid changes (clone affected rows for React immutability)
-  if (state.gridChanges && result.grid) {
+  // If server sent a periodic full grid sync, rebuild grid from it
+  // (overrides incremental gridChanges to correct any drift)
+  if (state.fullGrid && Array.isArray(state.fullGrid)) {
+    result.grid = [];
+    for (let y = 0; y < GRID_SIZE; y++) {
+      result.grid[y] = [];
+      for (let x = 0; x < GRID_SIZE; x++) {
+        result.grid[y][x] = state.fullGrid[y * GRID_SIZE + x];
+      }
+    }
+  } else if (state.gridChanges && result.grid) {
+    // Apply incremental grid changes (clone affected rows for React immutability)
     const clonedRows = new Set();
     for (let i = 0; i < state.gridChanges.length; i++) {
       const change = state.gridChanges[i];
