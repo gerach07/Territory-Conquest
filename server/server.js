@@ -154,7 +154,7 @@ function startGameLoop(roomId) {
     }
 
     const state = room.getStateForClients();
-    state.gridChanges = result.gridChanges;
+    state.gc = room.compactGridChanges(result.gridChanges);
     state.events = result.events;
 
     // Periodically include full grid so clients can self-correct drift
@@ -237,10 +237,10 @@ function handlePlayerLeave(socketId) {
     // Player already dead, just emit disconnect
     const gridChanges = [];
     room.killPlayer(socketId, 'disconnect', null, gridChanges);
-    io.to(roomId).emit('gameState', {
-      ...room.getStateForClients(), gridChanges,
-      events: [{ type: 'disconnect', playerId: socketId }],
-    });
+    const disconnectState = room.getStateForClients();
+    disconnectState.gc = room.compactGridChanges(gridChanges);
+    disconnectState.events = [{ type: 'disconnect', playerId: socketId }];
+    io.to(roomId).emit('gameState', disconnectState);
   }
 
   // If alive and playing, don't delete yet — wait for reconnection or grace period
@@ -313,11 +313,17 @@ io.on('connection', (socket) => {
   });
 
   socket.on('pingReport', ({ rtt }) => {
-    socket.playerPing = rtt;
+    // Validate client-reported RTT to avoid spoofing.
+    // Allow client to report rtt, but clamp to [0, 1000] and store a capped value used server-side (max 300ms).
+    let r = Number(rtt) || 0;
+    if (!isFinite(r) || r < 0) r = 0;
+    if (r > 1000) r = 1000;
+    // Store a trimmed value on socket for diagnostics, but cap value used in gameplay to 300ms.
+    socket.playerPing = Math.min(r, 300);
     // propagate into room record if player already in a game
     const roomId = playerToRoom[socket.id];
     if (roomId && rooms[roomId] && rooms[roomId].players[socket.id]) {
-      rooms[roomId].players[socket.id].ping = rtt;
+      rooms[roomId].players[socket.id].ping = Math.min(r, 300);
     }
   });
 
@@ -525,11 +531,10 @@ io.on('connection', (socket) => {
     });
     
     // Emit leave event to remaining players
-    io.to(roomId).emit('gameState', {
-      ...room.getStateForClients(),
-      gridChanges,
-      events: [{ type: 'leave', playerId: socket.id, playerName }],
-    });
+    const leaveState = room.getStateForClients();
+    leaveState.gc = room.compactGridChanges(gridChanges);
+    leaveState.events = [{ type: 'leave', playerId: socket.id, playerName }];
+    io.to(roomId).emit('gameState', leaveState);
     
     // Check if game should end (only 1 player left)
     if (alivePlayers.length <= 1) {

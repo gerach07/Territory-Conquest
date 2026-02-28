@@ -347,6 +347,10 @@ function App() {
     if (!socket) return;
 
     // time sync utility
+    // NTP-style clock sync — multiple probes with exponential moving average
+    let syncProbeCount = 0;
+    const SYNC_PROBE_TOTAL = 5;
+    const SYNC_PROBE_DELAY = 200; // ms between initial burst probes
     const syncTime = () => {
       const t0 = performance.now();
       socket.emit('timeSyncReq', { clientTime: t0 });
@@ -354,17 +358,31 @@ function App() {
 
     const onConnect = () => {
       setMyId(socket.id);
+      // Burst 5 probes on connect for a stable offset estimate
+      syncProbeCount = 0;
       syncTime();
     };
 
     const onTimeSyncResp = ({ clientTime, serverTime }) => {
       const now = performance.now();
       const rtt = now - clientTime;
-      const offset = serverTime + rtt/2 - now;
-      serverTimeOffsetRef.current = offset;
+      const offset = serverTime + rtt / 2 - now;
+
+      // Exponential moving average: alpha=1.0 on first probe, 0.2 thereafter
+      if (syncProbeCount === 0) {
+        serverTimeOffsetRef.current = offset;
+      } else {
+        const alpha = 0.2;
+        serverTimeOffsetRef.current = serverTimeOffsetRef.current * (1 - alpha) + offset * alpha;
+      }
       pingRef.current = rtt;
-      // inform server so it can compensate collisions
       socket.emit('pingReport', { rtt });
+
+      syncProbeCount++;
+      // Fire next burst probe if under quota
+      if (syncProbeCount < SYNC_PROBE_TOTAL) {
+        setTimeout(syncTime, SYNC_PROBE_DELAY);
+      }
     };
 
     const onServerTime = ({ serverTime }) => {
@@ -731,6 +749,8 @@ function App() {
     // Request full grid when tab regains visibility (prevents drift when backgrounded)
     const onVisibilityChange = () => {
       if (document.visibilityState === 'visible' && phaseRef.current === 'game') {
+        // Re-sync clock and request authoritative full grid on tab return
+        try { syncTime(); } catch (e) { /* noop if syncTime not available */ }
         socket.emit('requestFullGrid');
       }
     };

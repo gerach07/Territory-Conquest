@@ -10,7 +10,7 @@ const {
   RESPAWN_DELAY_MS, RECONNECT_GRACE_MS, START_TERRITORY_SIZE,
   PLAYER_COLORS, DIRECTIONS, START_POSITIONS, GameState, VALID_TRANSITIONS,
   RATE_LIMIT_ACTIONS_PER_SECOND, RATE_LIMIT_CHAT_PER_SECOND,
-  MAX_CHAT_LENGTH, MAX_CHAT_HISTORY, DEFAULT_GAME_TIME_SECONDS,
+  MAX_CHAT_LENGTH, MAX_CHAT_HISTORY, DEFAULT_GAME_TIME_SECONDS, TICK_MS,
 } = require('../constants');
 const RateLimiter = require('../utils/RateLimiter');
 
@@ -448,6 +448,7 @@ class Room {
     }
 
     const events = [], gridChanges = [];
+    const now = Date.now();
 
     for (const pid of this.playerOrder) {
       const p = this.players[pid];
@@ -455,7 +456,7 @@ class Room {
       if (p.forfeited) continue;
 
       // Check for disconnected player grace period expiry
-      if (p.disconnected && p.disconnectTime && Date.now() - p.disconnectTime > RECONNECT_GRACE_MS) {
+      if (p.disconnected && p.disconnectTime && now - p.disconnectTime > RECONNECT_GRACE_MS) {
         p.disconnected = false;
         this.killPlayer(pid, 'disconnect_timeout', null, gridChanges);
         events.push({ type: 'kill', victim: pid, reason: 'disconnect_timeout' });
@@ -466,7 +467,7 @@ class Room {
       }
 
       if (!p.alive) {
-        if (Date.now() - p.deathTime > RESPAWN_DELAY_MS) {
+        if (now - p.deathTime > RESPAWN_DELAY_MS) {
           this.respawnPlayer(pid, gridChanges);
           events.push({ type: 'respawn', playerId: pid });
         }
@@ -489,8 +490,10 @@ class Room {
       const trailOwnerIdx = this.trailGrid[newY][newX];
       const trailTs = this.trailTS[newY][newX] || 0;
       if (trailOwnerIdx !== 0) {
+        // Latency window: player's RTT + 1 tick of slack, capped at 300ms
+        const latencyWindow = Math.min((p.ping || 0) + TICK_MS, 300);
         // if the trail was laid more recently than the latency window, ignore it
-        if (now - trailTs < latencyWindow) {
+        if (trailTs > 0 && now - trailTs < latencyWindow) {
           // perceived hole due to lag; treat as empty
         } else {
           const trailOwnerId = this.playerOrder.find(id => this.players[id] && this.players[id].playerIndex === trailOwnerIdx);
@@ -544,7 +547,7 @@ class Room {
       } else if (cellOwner !== p.playerIndex) {
         p.trail.push({ x: newX, y: newY });
         this.trailGrid[newY][newX] = p.playerIndex;
-        this.trailTS[newY][newX] = Date.now();
+        this.trailTS[newY][newX] = now;
         gridChanges.push({ x: newX, y: newY, owner: p.playerIndex, type: 'trail' });
       }
     }
@@ -659,12 +662,13 @@ class Room {
     for (const pid of this.playerOrder) {
       const p = this.players[pid];
       if (!p) continue;
-      // Build trail as flat array to avoid per-tick object allocation
+      // Build trail as flat coord pairs to reduce allocation
       let trailArr;
       if (p.trail.length > 0) {
-        trailArr = new Array(p.trail.length);
+        trailArr = new Array(p.trail.length * 2);
         for (let i = 0; i < p.trail.length; i++) {
-          trailArr[i] = [p.trail[i].x, p.trail[i].y];
+          trailArr[i * 2] = p.trail[i].x;
+          trailArr[i * 2 + 1] = p.trail[i].y;
         }
       } else {
         trailArr = [];
@@ -685,6 +689,21 @@ class Room {
       timeRemaining: this.getRemainingTime(),
       state: this.state,
     };
+  }
+
+  /**
+   * Compact grid changes: flat array [x, y, owner, x, y, owner, ...]
+   * Reduces per-change payload from ~50 bytes (JSON object) to ~6 bytes.
+   */
+  compactGridChanges(gridChanges) {
+    if (!gridChanges || gridChanges.length === 0) return [];
+    const flat = new Array(gridChanges.length * 3);
+    for (let i = 0; i < gridChanges.length; i++) {
+      flat[i * 3] = gridChanges[i].x;
+      flat[i * 3 + 1] = gridChanges[i].y;
+      flat[i * 3 + 2] = gridChanges[i].owner;
+    }
+    return flat;
   }
 
   getFullGridForClient() {

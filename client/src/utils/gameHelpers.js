@@ -86,7 +86,26 @@ export function processGameState(state, flatGrid, prevGrid) {
       for (let i = 0; i < entries.length; i++) {
         const id = entries[i];
         const p = state.players[id];
-        const trail = p.t ? p.t : (p.trail ? p.trail.map(pt => [pt.x, pt.y]) : []);
+        // Trail: compact flat [x,y,x,y,...] or legacy [[x,y],[x,y],...] or {x,y}[]
+        let trail;
+        if (p.t && p.t.length > 0) {
+          if (Array.isArray(p.t[0])) {
+            // legacy nested arrays [[x,y],...]
+            trail = p.t;
+          } else if (typeof p.t[0] === 'number') {
+            // compact flat [x,y,x,y,...] — convert to [[x,y],...]
+            trail = new Array(p.t.length / 2);
+            for (let j = 0; j < trail.length; j++) {
+              trail[j] = [p.t[j * 2], p.t[j * 2 + 1]];
+            }
+          } else {
+            trail = p.t;
+          }
+        } else if (p.trail) {
+          trail = p.trail.map(pt => [pt.x, pt.y]);
+        } else {
+          trail = [];
+        }
         players[i] = {
           id,
           name:        p.name,
@@ -130,17 +149,33 @@ export function processGameState(state, flatGrid, prevGrid) {
         result.grid[y][x] = state.fullGrid[y * GRID_SIZE + x];
       }
     }
-  } else if (state.gridChanges && result.grid) {
-    // Apply incremental grid changes (clone affected rows for React immutability)
+  } else if (result.grid) {
+    // Apply incremental grid changes — compact format (flat [x,y,owner,...]) or legacy objects
+    const gc = state.gc; // compact: [x, y, owner, x, y, owner, ...]
+    const gridChanges = state.gridChanges; // legacy: [{x, y, owner, type}, ...]
     const clonedRows = new Set();
-    for (let i = 0; i < state.gridChanges.length; i++) {
-      const change = state.gridChanges[i];
-      if (change.y >= 0 && change.y < GRID_SIZE && change.x >= 0 && change.x < GRID_SIZE) {
-        if (!clonedRows.has(change.y)) {
-          result.grid[change.y] = [...result.grid[change.y]];
-          clonedRows.add(change.y);
+
+    if (gc && gc.length > 0) {
+      for (let i = 0; i < gc.length; i += 3) {
+        const x = gc[i], y = gc[i + 1], owner = gc[i + 2];
+        if (y >= 0 && y < GRID_SIZE && x >= 0 && x < GRID_SIZE) {
+          if (!clonedRows.has(y)) {
+            result.grid[y] = [...result.grid[y]];
+            clonedRows.add(y);
+          }
+          result.grid[y][x] = owner;
         }
-        result.grid[change.y][change.x] = change.owner;
+      }
+    } else if (gridChanges && gridChanges.length > 0) {
+      for (let i = 0; i < gridChanges.length; i++) {
+        const change = gridChanges[i];
+        if (change.y >= 0 && change.y < GRID_SIZE && change.x >= 0 && change.x < GRID_SIZE) {
+          if (!clonedRows.has(change.y)) {
+            result.grid[change.y] = [...result.grid[change.y]];
+            clonedRows.add(change.y);
+          }
+          result.grid[change.y][change.x] = change.owner;
+        }
       }
     }
   }
