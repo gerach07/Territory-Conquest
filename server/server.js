@@ -313,17 +313,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('pingReport', ({ rtt }) => {
-    // Validate client-reported RTT to avoid spoofing.
-    // Allow client to report rtt, but clamp to [0, 1000] and store a capped value used server-side (max 300ms).
-    let r = Number(rtt) || 0;
-    if (!isFinite(r) || r < 0) r = 0;
-    if (r > 1000) r = 1000;
-    // Store a trimmed value on socket for diagnostics, but cap value used in gameplay to 300ms.
-    socket.playerPing = Math.min(r, 300);
+    socket.playerPing = rtt;
     // propagate into room record if player already in a game
     const roomId = playerToRoom[socket.id];
     if (roomId && rooms[roomId] && rooms[roomId].players[socket.id]) {
-      rooms[roomId].players[socket.id].ping = Math.min(r, 300);
+      rooms[roomId].players[socket.id].ping = rtt;
     }
   });
 

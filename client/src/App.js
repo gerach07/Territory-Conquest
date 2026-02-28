@@ -749,8 +749,6 @@ function App() {
     // Request full grid when tab regains visibility (prevents drift when backgrounded)
     const onVisibilityChange = () => {
       if (document.visibilityState === 'visible' && phaseRef.current === 'game') {
-        // Re-sync clock and request authoritative full grid on tab return
-        try { syncTime(); } catch (e) { /* noop if syncTime not available */ }
         socket.emit('requestFullGrid');
       }
     };
