@@ -39,6 +39,8 @@ const useSocket = () => {
         reconnectionDelayMax: 5000,
         reconnectionAttempts: Infinity,
       });
+      // receive binary packets as ArrayBuffer for msgpack decoder
+      if (s.io && s.io.engine) s.io.engine.binaryType = 'arraybuffer';
       s.on('connect',    () => { if (!cancelled) { setIsConnected(true);  } });
       s.on('disconnect', () => { if (!cancelled) { setIsConnected(false); } });
       socketRef.current = s;

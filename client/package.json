@@ -6,7 +6,8 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "socket.io-client": "^4.5.4",
-    "react-scripts": "5.0.1"
+    "react-scripts": "5.0.1",
+    "msgpack-lite": "^0.1.26"
   },
   "devDependencies": {
     "tailwindcss": "^3.3.0",

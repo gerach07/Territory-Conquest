@@ -106,6 +106,7 @@ const GameCanvas = memo(({
   lightTheme,
   prevPlayers, tickTime,
   localSim,
+  timeOffset,             // added from App
 }) => {
   const { t }       = useI18n();
   const canvasRef    = useRef(null);
@@ -375,7 +376,7 @@ const GameCanvas = memo(({
       const h = canvas.height;
 
       // Interpolation factor for OTHER players (local player uses local sim)
-      const now = performance.now();
+      const now = performance.now() + (timeOffset?.current || 0);
       const tickT = tickTime?.current || now;
       const elapsed = now - tickT;
       const t_lerp = Math.min(elapsed / TICK_MS, 3.5);

@@ -12,6 +12,7 @@ import { buildWaitingData, processGameState, formatUptime, getRoomFromURL, setUR
 import { playSound, setSoundEnabled } from './utils/sounds';
 import { playPhaseMusic } from './utils/music';
 import { TICK_MS, GRID_SIZE } from './constants';
+import msgpack from 'msgpack-lite';
 
 import LoginView        from './components/LoginView';
 import WaitingRoom      from './components/WaitingRoom';
@@ -135,8 +136,12 @@ function App() {
 
   // Interpolation: store previous player positions + tick timestamp
   const prevPlayersRef = useRef(null);   // positions at tick N-1
-  const tickTimeRef    = useRef(0);      // when tick N arrived (performance.now())
+  const tickTimeRef    = useRef(0);      // when tick N arrived (aligned to server clock)
   const lastServerSeqRef = useRef(0);
+
+  // clock sync / ping
+  const serverTimeOffsetRef = useRef(0); // ms to add to local perf.now() to match server clock
+  const pingRef = useRef(0);            // RTT in ms
 
   // ── Local simulation for own player ──
   // Runs at the same 10Hz tick rate as the server, moving 1 cell per tick.
@@ -341,7 +346,35 @@ function App() {
   useEffect(() => {
     if (!socket) return;
 
-    const onConnect = () => { setMyId(socket.id); };
+    // time sync utility
+    const syncTime = () => {
+      const t0 = performance.now();
+      socket.emit('timeSyncReq', { clientTime: t0 });
+    };
+
+    const onConnect = () => {
+      setMyId(socket.id);
+      syncTime();
+    };
+
+    const onTimeSyncResp = ({ clientTime, serverTime }) => {
+      const now = performance.now();
+      const rtt = now - clientTime;
+      const offset = serverTime + rtt/2 - now;
+      serverTimeOffsetRef.current = offset;
+      pingRef.current = rtt;
+      // inform server so it can compensate collisions
+      socket.emit('pingReport', { rtt });
+    };
+
+    const onServerTime = ({ serverTime }) => {
+      // occasional push; update offset smoothly and trigger new request
+      const now = performance.now();
+      const offset = serverTime - now;
+      serverTimeOffsetRef.current = offset;
+      // request fresh RTT ping from server
+      syncTime();
+    };
 
     const onGameJoined = (data) => {
       const roomCode = data.roomId;
@@ -442,7 +475,11 @@ function App() {
       playSound('start');
     };
 
-    const onGameState = (state) => {
+    const onGameState = (data) => {
+      // gameState may arrive as binary (msgpack) or JSON; decode
+      const state = (data instanceof ArrayBuffer || data instanceof Uint8Array)
+        ? msgpack.decode(new Uint8Array(data))
+        : data;
       const seq = Number.isFinite(state?.seq) ? state.seq : null;
       if (seq !== null && seq <= lastServerSeqRef.current) {
         return;
@@ -453,7 +490,7 @@ function App() {
 
       const prevGs = gameStateRef.current;
       const myId = socketRef.current?.id;
-      const now = performance.now();
+      const now = performance.now() + serverTimeOffsetRef.current;
 
       // Snapshot previous positions for OTHER players' interpolation
       if (prevGs?.players) {
@@ -472,16 +509,17 @@ function App() {
         if (meIdx !== -1) {
           const serverMe = gs.players[meIdx];
 
-          // Remove confirmed inputs from buffer
+          // remove confirmed inputs and cap history
           const serverLIS = serverMe.lis || 0;
           inputBufferRef.current = inputBufferRef.current.filter(i => i.seq > serverLIS);
-          const hasUnconfirmed = inputBufferRef.current.length > 0;
+          if (inputBufferRef.current.length > 20) {
+            inputBufferRef.current.splice(0, inputBufferRef.current.length - 20);
+          }
 
           if (!serverMe.alive) {
-            // Server says we're dead
             sim.alive = false;
           } else if (!sim.alive) {
-            // Server says alive but we thought dead (respawn)
+            // respawn correction
             sim.alive = true;
             sim.x = serverMe.x; sim.y = serverMe.y;
             sim.prevX = serverMe.x; sim.prevY = serverMe.y;
@@ -494,47 +532,39 @@ function App() {
             const dist = Math.abs(dx) + Math.abs(dy);
 
             if (dist > 10) {
-              // Very large discrepancy (respawn/teleport) — snap immediately
+              // teleport or large error – snap and clear
               sim.x = serverMe.x; sim.y = serverMe.y;
               sim.prevX = serverMe.x; sim.prevY = serverMe.y;
               sim.direction = serverMe.direction;
               sim.visualOffsetX = 0; sim.visualOffsetY = 0;
               inputBufferRef.current = [];
-            } else if (hasUnconfirmed) {
-              // Server hasn't processed our latest inputs yet.
-              // Our local sim is intentionally diverged — don't correct.
-              // Safety: if too many unconfirmed inputs, something is wrong
-              if (inputBufferRef.current.length > 15) {
-                inputBufferRef.current = [];
-                sim.x = serverMe.x; sim.y = serverMe.y;
-                sim.prevX = serverMe.x; sim.prevY = serverMe.y;
-                sim.direction = serverMe.direction;
-                sim.visualOffsetX = 0; sim.visualOffsetY = 0;
-              }
-            } else {
-              // All inputs confirmed — server is authoritative
+            } else if (inputBufferRef.current.length > 0) {
+              // replay buffer: rewind to authoritative state and apply pending inputs
+              sim.x = serverMe.x;
+              sim.y = serverMe.y;
+              sim.prevX = serverMe.x;
+              sim.prevY = serverMe.y;
               sim.direction = serverMe.direction;
-
-              if (dist > 0) {
-                // Check if error is just the expected forward lead
-                // (client sim is a few ticks ahead of server state)
-                const dv = DIR_V[sim.direction] || [0, 0];
-                const forward = dx * dv[0] + dy * dv[1]; // projection onto movement dir
-                const lateralDist = dist - Math.abs(forward);
-
-                if (lateralDist === 0 && forward > 0 && forward <= 4) {
-                  // Pure forward lead within tolerance — expected, don't correct
-                } else {
-                  // Real error: smooth correct via visual offset
-                  sim.visualOffsetX += dx;
-                  sim.visualOffsetY += dy;
-                  sim.x = serverMe.x;
-                  sim.y = serverMe.y;
-                  // Set prev so interpolation continues smoothly from new position
-                  const mvDir = DIR_V[sim.direction] || [0, 0];
-                  sim.prevX = sim.x - mvDir[0];
-                  sim.prevY = sim.y - mvDir[1];
-                }
+              sim.visualOffsetX = 0;
+              sim.visualOffsetY = 0;
+              for (const inp of inputBufferRef.current) {
+                const dv = DIR_V[inp.dir] || [0, 0];
+                sim.x += dv[0];
+                sim.y += dv[1];
+              }
+            } else if (dist > 0) {
+              // no pending inputs but still a discrepancy – smooth adjust
+              sim.direction = serverMe.direction;
+              const dv = DIR_V[sim.direction] || [0, 0];
+              const forward = dx * dv[0] + dy * dv[1];
+              const lateralDist = dist - Math.abs(forward);
+              if (!(lateralDist === 0 && forward > 0 && forward <= 4)) {
+                sim.visualOffsetX += dx;
+                sim.visualOffsetY += dy;
+                sim.x = serverMe.x;
+                sim.y = serverMe.y;
+                sim.prevX = sim.x - dv[0];
+                sim.prevY = sim.y - dv[1];
               }
             }
           }
@@ -707,6 +737,8 @@ function App() {
     document.addEventListener('visibilitychange', onVisibilityChange);
 
     socket.on('connect',          onConnect);
+    socket.on('timeSyncResp',     onTimeSyncResp);
+    socket.on('timeSync',         onServerTime);
     socket.on('gameJoined',       onGameJoined);
     socket.on('spectatorJoined',  onSpectatorJoined);
     socket.on('playerJoined',     onPlayerJoined);
@@ -731,6 +763,8 @@ function App() {
 
     return () => {
       socket.off('connect',          onConnect);
+      socket.off('timeSyncResp',     onTimeSyncResp);
+      socket.off('timeSync',         onServerTime);
       socket.off('gameJoined',       onGameJoined);
       socket.off('spectatorJoined',  onSpectatorJoined);
       socket.off('playerJoined',     onPlayerJoined);
@@ -873,9 +907,12 @@ function App() {
     if (opposites[me.direction] === dir) return; // server would reject this
     if (me.direction === dir) return; // already heading that way
 
-    // Assign sequence number and track in input buffer
+    // Assign sequence number and track in input buffer (keep only last 20)
     const seq = ++inputSeqRef.current;
     inputBufferRef.current.push({ seq, dir });
+    if (inputBufferRef.current.length > 20) {
+      inputBufferRef.current.shift();
+    }
 
     // Send to server with sequence number
     socketRef.current?.emit('changeDirection', { direction: dir, seq });
@@ -1117,6 +1154,7 @@ function App() {
             prevPlayers={prevPlayersRef}
             tickTime={tickTimeRef}
             localSim={localSimRef}
+            timeOffset={serverTimeOffsetRef}
           />
         )}
 

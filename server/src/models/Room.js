@@ -210,6 +210,7 @@ class Room {
       alive: true, deathTime: 0, score: 0, kills: 0,
       lastInputSeq: 0,
       joinedAt: Date.now(),
+      ping: 0,              // latency estimate (ms)
     };
     return true;
   }
@@ -261,6 +262,11 @@ class Room {
       this.grid[y] = new Int8Array(GRID_SIZE);
       this.trailGrid[y] = new Int8Array(GRID_SIZE);
     }
+    // initialize trail timestamps (ms since epoch)
+    this.trailTS = new Array(GRID_SIZE);
+    for (let y = 0; y < GRID_SIZE; y++) {
+      this.trailTS[y] = new Float64Array(GRID_SIZE); // use float for Date.now()
+    }
 
     // Per-player cell count for O(1) score updates
     this.cellCounts = {};
@@ -273,6 +279,7 @@ class Room {
       const startPos = START_POSITIONS[idx % START_POSITIONS.length];
       p.x = startPos.x; p.y = startPos.y;
       p.direction = 'right'; p.trail = [];
+      p.ping = 0;                        // tracked via pingReport
       p.alive = true; p.deathTime = 0; p.score = 0; p.kills = 0;
       p.playerIndex = idx + 1;
       p.forfeited = false;
@@ -480,25 +487,31 @@ class Room {
       }
 
       const trailOwnerIdx = this.trailGrid[newY][newX];
+      const trailTs = this.trailTS[newY][newX] || 0;
       if (trailOwnerIdx !== 0) {
-        const trailOwnerId = this.playerOrder.find(id => this.players[id] && this.players[id].playerIndex === trailOwnerIdx);
-        if (trailOwnerIdx === p.playerIndex) {
-          // Crossing own trail — detect loop via trailGrid (O(1) instead of O(trail_length))
-          const loopStart = p.trail.findIndex(pt => pt.x === newX && pt.y === newY);
-          if (loopStart >= 0) {
-            const loop = p.trail.slice(loopStart);
-            const captured = captureTerritory(this.grid, p.playerIndex, loop, this.cellCounts, this.ownedCells);
-            for (const pos of loop) { this.trailGrid[pos.y][pos.x] = 0; }
-            for (const pos of loop) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'trail_to_territory' }); }
-            for (const pos of captured) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'captured' }); }
-            p.trail = p.trail.slice(0, loopStart);
-            events.push({ type: 'capture', playerId: pid, capturedCount: captured.length });
+        // if the trail was laid more recently than the latency window, ignore it
+        if (now - trailTs < latencyWindow) {
+          // perceived hole due to lag; treat as empty
+        } else {
+          const trailOwnerId = this.playerOrder.find(id => this.players[id] && this.players[id].playerIndex === trailOwnerIdx);
+          if (trailOwnerIdx === p.playerIndex) {
+            // Crossing own trail — detect loop via trailGrid (O(1) instead of O(trail_length))
+            const loopStart = p.trail.findIndex(pt => pt.x === newX && pt.y === newY);
+            if (loopStart >= 0) {
+              const loop = p.trail.slice(loopStart);
+              const captured = captureTerritory(this.grid, p.playerIndex, loop, this.cellCounts, this.ownedCells);
+              for (const pos of loop) { this.trailGrid[pos.y][pos.x] = 0; this.trailTS[pos.y][pos.x] = 0; }
+              for (const pos of loop) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'trail_to_territory' }); }
+              for (const pos of captured) { gridChanges.push({ x: pos.x, y: pos.y, owner: p.playerIndex, type: 'captured' }); }
+              p.trail = p.trail.slice(0, loopStart);
+              events.push({ type: 'capture', playerId: pid, capturedCount: captured.length });
+            }
+          } else if (trailOwnerId) {
+            this.killPlayer(trailOwnerId, 'trail_cut', pid, gridChanges);
+            events.push({ type: 'kill', victim: trailOwnerId, killer: pid, reason: 'trail_cut' });
           }
-        } else if (trailOwnerId) {
-          this.killPlayer(trailOwnerId, 'trail_cut', pid, gridChanges);
-          events.push({ type: 'kill', victim: trailOwnerId, killer: pid, reason: 'trail_cut' });
+          if (!p.alive) continue;
         }
-        if (!p.alive) continue;
       }
 
       for (const otherId of this.playerOrder) {
@@ -531,6 +544,7 @@ class Room {
       } else if (cellOwner !== p.playerIndex) {
         p.trail.push({ x: newX, y: newY });
         this.trailGrid[newY][newX] = p.playerIndex;
+        this.trailTS[newY][newX] = Date.now();
         gridChanges.push({ x: newX, y: newY, owner: p.playerIndex, type: 'trail' });
       }
     }
@@ -545,6 +559,7 @@ class Room {
     p.alive = false; p.deathTime = Date.now();
     for (const pos of p.trail) {
       this.trailGrid[pos.y][pos.x] = 0;
+      this.trailTS[pos.y][pos.x] = 0;
       gridChanges.push({ x: pos.x, y: pos.y, owner: 0, type: 'trail_removed' });
     }
     p.trail = [];

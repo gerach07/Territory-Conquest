@@ -11,6 +11,7 @@ const cors = require('cors');
 const compression = require('compression');
 const helmet = require('helmet');
 const path = require('path');
+const msgpack = require('msgpack-lite'); // binary serialization
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const pkg = require('./package.json');
@@ -163,7 +164,14 @@ function startGameLoop(roomId) {
       state.fullGrid = room.getFullGridForClient();
     }
 
-    io.to(roomId).emit('gameState', state);
+    // binary-encode state for bandwidth reduction
+    try {
+      const buf = msgpack.encode(state);
+      io.to(roomId).emit('gameState', buf);
+    } catch (err) {
+      // fallback to JSON if msgpack fails for whatever reason
+      io.to(roomId).emit('gameState', state);
+    }
 
     // Game finished by timer
     if (result.gameFinished) {
@@ -294,6 +302,30 @@ function handlePlayerLeave(socketId) {
 
 io.on('connection', (socket) => {
   const clientIp = socket.handshake.headers['x-forwarded-for']?.split(',')[0]?.trim() || socket.handshake.address;
+  // attach ping/offset storage on socket
+  socket.playerPing = 0;
+  socket.serverTimeOffset = 0;
+
+  // time synchronization handshake (simple NTP-style)
+  socket.on('timeSyncReq', ({ clientTime }) => {
+    // reply immediately with server time and echo clientTime
+    socket.emit('timeSyncResp', { clientTime, serverTime: Date.now() });
+  });
+
+  socket.on('pingReport', ({ rtt }) => {
+    socket.playerPing = rtt;
+    // propagate into room record if player already in a game
+    const roomId = playerToRoom[socket.id];
+    if (roomId && rooms[roomId] && rooms[roomId].players[socket.id]) {
+      rooms[roomId].players[socket.id].ping = rtt;
+    }
+  });
+
+  // optional periodic server time push for jitter smoothing
+  const timeSyncInterval = setInterval(() => {
+    socket.emit('timeSync', { serverTime: Date.now() });
+  }, 30000);
+  socket.on('disconnect', () => clearInterval(timeSyncInterval));
 
   if (!ipRateLimiter.isAllowed(clientIp)) {
     socket.emit('error', { error: 'Too many connections. Please wait.' });
