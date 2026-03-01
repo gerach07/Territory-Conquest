@@ -140,6 +140,8 @@
   "serverInfo.uptime": "Darbības laiks",
   "serverInfo.node": "Node",
   "serverInfo.memory": "Atmiņa",
+  "serverInfo.ping": "Ping",
+  "serverInfo.tickRate": "Tik ātrums",
 
   "msg.joinedRoom": "Pievienojies istabai {0}",
   "msg.spectating": "Skaties istabu {0}",

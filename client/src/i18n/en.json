@@ -140,6 +140,8 @@
   "serverInfo.uptime": "Uptime",
   "serverInfo.node": "Node",
   "serverInfo.memory": "Memory",
+  "serverInfo.ping": "Ping",
+  "serverInfo.tickRate": "Tick Rate",
 
   "msg.joinedRoom": "Joined room {0}",
   "msg.spectating": "Spectating room {0}",

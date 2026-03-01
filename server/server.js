@@ -118,7 +118,7 @@ function acquireRoomLock(roomId) {
 // ============================================================================
 
 // Full-grid sync interval (every N ticks, send the entire grid to keep clients in sync)
-const FULL_GRID_SYNC_TICKS = 50; // = 5 seconds at 10 ticks/sec
+const FULL_GRID_SYNC_TICKS = 100; // = 10 seconds at 10 ticks/sec
 
 function startGameLoop(roomId) {
   const room = rooms[roomId];
@@ -154,8 +154,9 @@ function startGameLoop(roomId) {
     }
 
     const state = room.getStateForClients();
-    state.gc = room.compactGridChanges(result.gridChanges);
-    state.events = result.events;
+    const gc = room.compactGridChanges(result.gridChanges);
+    if (gc.length > 0) state.gc = gc;
+    if (result.events.length > 0) state.events = result.events;
 
     // Periodically include full grid so clients can self-correct drift
     tickCount++;

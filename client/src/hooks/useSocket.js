@@ -74,6 +74,8 @@ const useSocket = () => {
     };
 
     const local = io(LOCAL_SERVER_URL, {
+      transports: ['websocket'],   // WebSocket only — matches server config
+      upgrade: false,
       reconnection: false,
       timeout: LOCAL_TIMEOUT_MS,
     });

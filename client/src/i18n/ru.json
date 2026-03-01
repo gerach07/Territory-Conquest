@@ -139,6 +139,8 @@
   "serverInfo.uptime": "Время работы",
   "serverInfo.node": "Node",
   "serverInfo.memory": "Память",
+  "serverInfo.ping": "Пинг",
+  "serverInfo.tickRate": "Тик рейт",
 
   "msg.joinedRoom": "Присоединился к комнате {0}",
   "msg.spectating": "Наблюдение за комнатой {0}",

@@ -88,7 +88,7 @@ const DeathOverlay = memo(function DeathOverlay({ deathTime, t }) {
     return () => clearInterval(id);
   }, [deathTime]);
   return (
-    <div className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm flex items-center justify-center pointer-events-none">
+    <div className="fixed inset-0 z-30 bg-black/70 flex items-center justify-center pointer-events-none">
       <div className="text-center animate-fade-in">
         <div className="text-6xl mb-3">{t('game.youDied')}</div>
         <p className="text-slate-400 text-sm">
@@ -100,13 +100,14 @@ const DeathOverlay = memo(function DeathOverlay({ deathTime, t }) {
 });
 
 const GameCanvas = memo(({
-  gameState, myId, isSpectator, isDead, deathTime,
+  gameState, appGameStateRef, gridVersionRef, myId, isSpectator, isDead, deathTime,
   onDirectionChange, onLeaveGame,
   timeRemaining, killFeed,
   lightTheme,
   prevPlayers, tickTime,
   localSim,
-  timeOffset,             // added from App
+  timeOffset,
+  pingRef,
 }) => {
   const { t }       = useI18n();
   const canvasRef    = useRef(null);
@@ -122,6 +123,7 @@ const GameCanvas = memo(({
   const gridCanvasRef = useRef(null);
   const gridCtxRef = useRef(null);
   const gridDirtyRef = useRef(true); // flag: needs full redraw
+  const lastGridVersionRef = useRef(0); // track gridVersionRef changes
 
   // Offscreen canvas for minimap (updated only on grid changes)
   const mmCanvasRef = useRef(null);
@@ -133,6 +135,22 @@ const GameCanvas = memo(({
   // Previous frame time for visual offset decay computation
   const prevFrameTimeRef = useRef(0);
 
+  // Smoothed camera position (eliminates micro-jitter)
+  const camSmoothRef = useRef({ x: GRID_SIZE / 2, y: GRID_SIZE / 2, init: false });
+
+  // FPS counter
+  const fpsRef = useRef({ frames: 0, lastTime: 0, value: 0 });
+
+  // Metrics display state (updated ~1Hz for HTML overlay)
+  const [metricsDisplay, setMetricsDisplay] = useState({ fps: 0, ping: 0 });
+  const metricsTimerRef = useRef(null);
+  useEffect(() => {
+    metricsTimerRef.current = setInterval(() => {
+      setMetricsDisplay({ fps: fpsRef.current.value, ping: Math.round(pingRef?.current || 0) });
+    }, 2000);
+    return () => clearInterval(metricsTimerRef.current);
+  }, [pingRef]);
+
   // Spectator camera state
   const [followPlayer, setFollowPlayer] = useState(null); // null = overview, playerId = follow
   const specCamRef = useRef({ x: GRID_SIZE / 2, y: GRID_SIZE / 2, zoom: 1 }); // free camera
@@ -143,8 +161,6 @@ const GameCanvas = memo(({
   // Keep refs current (combined into fewer effects)
   useEffect(() => {
     gameStateRef.current = gameState;
-    // Mark grid dirty when gameState changes with grid changes
-    gridDirtyRef.current = true;
   }, [gameState]);
   useEffect(() => { myIdRef.current = myId; }, [myId]);
   useEffect(() => { followPlayerRef.current = followPlayer; }, [followPlayer]);
@@ -369,17 +385,36 @@ const GameCanvas = memo(({
     }
 
     const render = () => {
-      const gs = gameStateRef.current;
+      // Use App's always-current ref (not throttled by React) for smooth 60fps
+      const gs = appGameStateRef?.current || gameStateRef.current;
       if (!gs) { animFrameRef.current = requestAnimationFrame(render); return; }
+
+      // FPS tracking
+      const fpsData = fpsRef.current;
+      fpsData.frames++;
+      const fpsNow = performance.now();
+      if (fpsNow - fpsData.lastTime >= 1000) {
+        fpsData.value = fpsData.frames;
+        fpsData.frames = 0;
+        fpsData.lastTime = fpsNow;
+      }
+
+      // Detect grid changes via version counter (independent of React re-renders)
+      const gv = gridVersionRef?.current || 0;
+      if (gv !== lastGridVersionRef.current) {
+        gridDirtyRef.current = true;
+        lastGridVersionRef.current = gv;
+      }
 
       const w = canvas.width;
       const h = canvas.height;
 
       // Interpolation factor for OTHER players (local player uses local sim)
-      const now = performance.now() + (timeOffset?.current || 0);
+      // Use raw performance.now() — server offset is for clock sync, not frame timing
+      const now = performance.now();
       const tickT = tickTime?.current || now;
       const elapsed = now - tickT;
-      const t_lerp = Math.min(elapsed / TICK_MS, 3.5);
+      const t_lerp = Math.min(elapsed / TICK_MS, 1.8); // cap extrapolation
       const prev = prevPlayers?.current || {};
 
       const me = gs.players?.find(p => p.id === myIdRef.current);
@@ -391,20 +426,47 @@ const GameCanvas = memo(({
       const sim = localSim?.current;
       let meInterp;
       if (me && sim && sim.active && sim.alive) {
-        // Decay visual offset (exponential decay, ~200ms to clear)
+        // ── Drive local sim tick accumulator from render loop (perfect sync) ──
+        if (!sim._lastRAF) { sim._lastRAF = now; sim._accumulator = 0; }
+        sim._accumulator += now - sim._lastRAF;
+        sim._lastRAF = now;
+        // Cap accumulator to avoid spiral-of-death if tab was backgrounded
+        if (sim._accumulator > TICK_MS * 4) sim._accumulator = TICK_MS * 4;
+        while (sim._accumulator >= TICK_MS) {
+          sim._accumulator -= TICK_MS;
+          sim.prevX = sim.x;
+          sim.prevY = sim.y;
+          // Logical tick time: current time minus leftover accumulator
+          sim.tickTime = now - sim._accumulator;
+          sim.simTick++;
+          const dv = DIR_VECTORS[sim.direction];
+          if (dv) {
+            const nx = sim.x + dv.dx;
+            const ny = sim.y + dv.dy;
+            if (nx < 0 || nx >= GRID_SIZE || ny < 0 || ny >= GRID_SIZE) {
+              sim.alive = false;
+              break;
+            }
+            sim.x = nx;
+            sim.y = ny;
+          }
+        }
+
+        // Decay visual offset (fast exponential decay, ~180ms to clear 95%)
         const prevFrame = prevFrameTimeRef.current || now;
         const dt = Math.min((now - prevFrame) / 1000, 0.05); // cap at 50ms
         if (dt > 0) {
-          const decay = Math.exp(-15 * dt); // rate 15 → ~200ms to clear 95%
+          const decay = Math.exp(-16 * dt); // rate 16 → ~180ms to clear 95%
           sim.visualOffsetX *= decay;
           sim.visualOffsetY *= decay;
-          if (Math.abs(sim.visualOffsetX) < 0.01) sim.visualOffsetX = 0;
-          if (Math.abs(sim.visualOffsetY) < 0.01) sim.visualOffsetY = 0;
+          if (Math.abs(sim.visualOffsetX) < 0.005) sim.visualOffsetX = 0;
+          if (Math.abs(sim.visualOffsetY) < 0.005) sim.visualOffsetY = 0;
         }
         prevFrameTimeRef.current = now;
 
+        // Interpolate between prevX/Y and x/y using leftover accumulator time
         const simElapsed = now - (sim.tickTime || now);
-        const t = Math.min(simElapsed / TICK_MS, 1.0); // clamp to [0,1] — no extrapolation past sim tick
+        const t = Math.min(simElapsed / TICK_MS, 1.0);
         meInterp = {
           ix: sim.prevX + (sim.x - sim.prevX) * t + sim.visualOffsetX,
           iy: sim.prevY + (sim.y - sim.prevY) * t + sim.visualOffsetY,
@@ -442,9 +504,18 @@ const GameCanvas = memo(({
         viewCells = 30 / specCam.zoom;
         cellSize = Math.max(w, h) / viewCells;
       } else {
-        // Player mode camera
-        camX = meInterp ? meInterp.ix : GRID_SIZE / 2;
-        camY = meInterp ? meInterp.iy : GRID_SIZE / 2;
+        // Player mode camera with smoothing
+        const targetCamX = meInterp ? meInterp.ix : GRID_SIZE / 2;
+        const targetCamY = meInterp ? meInterp.iy : GRID_SIZE / 2;
+        const cam = camSmoothRef.current;
+        if (!cam.init) {
+          cam.x = targetCamX; cam.y = targetCamY; cam.init = true;
+        }
+        // High-responsiveness exponential tracking (0.7 = very tight follow)
+        cam.x += (targetCamX - cam.x) * 0.7;
+        cam.y += (targetCamY - cam.y) * 0.7;
+        camX = cam.x;
+        camY = cam.y;
         viewCells = 30;
         cellSize  = Math.max(w, h) / viewCells;
       }
@@ -525,6 +596,11 @@ const GameCanvas = memo(({
           if (p.trail?.length > 0) {
             ctx.fillStyle = PLAYER_COLORS_ALPHA80[p.colorIndex] || 'rgba(255,255,255,0.5)';
             p.trail.forEach(([tx, ty]) => {
+              // Skip the cell at the player's current head position — the head
+              // square is drawn separately in the "Players" pass. Without this,
+              // the trail cell at the server position appears as a ghost ahead
+              // of the interpolated/predicted head.
+              if (tx === p.x && ty === p.y) return;
               ctx.fillRect(tx * cellSize + ox + 1, ty * cellSize + oy + 1, cellSize - 2, cellSize - 2);
             });
           }
@@ -544,12 +620,16 @@ const GameCanvas = memo(({
           const py = iy * cellSize + oy;
           const s = cellSize;
 
-          if (isSelf) { ctx.shadowColor = color; ctx.shadowBlur = 12; }
           ctx.fillStyle = color;
           ctx.fillRect(px + 1, py + 1, s - 2, s - 2);
+          // Highlight for own player (bright outline instead of expensive shadowBlur)
+          if (isSelf) {
+            ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(px, py, s, s);
+          }
           ctx.fillStyle = 'rgba(255,255,255,0.25)';
           ctx.fillRect(px + s * 0.2, py + s * 0.2, s * 0.3, s * 0.3);
-          if (isSelf) ctx.shadowBlur = 0;
 
           // Name tag (only change font when size changes)
           const fontSize = Math.max(10, cellSize * 0.35);
@@ -625,18 +705,37 @@ const GameCanvas = memo(({
 
       {/* ── Timer ── */}
       {timeRemaining != null && (
-        <div className={`fixed top-14 left-1/2 -translate-x-1/2 z-20 px-4 py-1.5 rounded-xl font-mono font-bold text-lg backdrop-blur-md border ${
-          timeRemaining <= 30 ? 'bg-red-900/60 border-red-500/50 text-red-300 animate-pulse' :
-          timeRemaining <= 60 ? 'bg-orange-900/40 border-orange-500/40 text-orange-300' :
-          'bg-slate-900/60 border-slate-600/30 text-slate-200'
+        <div className={`fixed top-3 left-1/2 -translate-x-1/2 z-20 px-4 py-1.5 rounded-xl font-mono font-bold text-lg border ${
+          timeRemaining <= 30 ? 'bg-red-900/90 border-red-500/50 text-red-300 animate-pulse' :
+          timeRemaining <= 60 ? 'bg-orange-900/85 border-orange-500/40 text-orange-300' :
+          'bg-slate-900/85 border-slate-600/30 text-slate-200'
         }`}>
           {Math.floor(timeRemaining / 60)}:{(timeRemaining % 60).toString().padStart(2, '0')}
         </div>
       )}
 
-      {/* ── Leaderboard ── */}
-      <div className="fixed top-14 right-3 z-20 w-44">
-        <div className="glass-card p-2 space-y-0.5">
+      {/* ── Server Metrics (opaque bg — avoids expensive backdrop-blur over canvas) ── */}
+      <div className="fixed top-3 left-3 z-20">
+        <div className="bg-slate-900/85 border border-slate-700/30 rounded-xl p-2 space-y-0.5">
+          <h3 className="text-[0.65rem] font-bold text-slate-400 mb-1">STATS</h3>
+          <div className="flex items-center gap-1.5 text-[0.65rem] px-1 py-0.5">
+            <span className="text-slate-500">FPS</span>
+            <span className="font-mono" style={{ color: metricsDisplay.fps >= 55 ? '#4ade80' : metricsDisplay.fps >= 30 ? '#facc15' : '#f87171' }}>{metricsDisplay.fps}</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-[0.65rem] px-1 py-0.5">
+            <span className="text-slate-500">PING</span>
+            <span className="font-mono" style={{ color: metricsDisplay.ping < 50 ? '#4ade80' : metricsDisplay.ping < 100 ? '#facc15' : '#f87171' }}>{metricsDisplay.ping}ms</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-[0.65rem] px-1 py-0.5">
+            <span className="text-slate-500">TICK</span>
+            <span className="font-mono text-slate-400">10Hz</span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Leaderboard (opaque bg — avoids expensive backdrop-blur over canvas) ── */}
+      <div className="fixed top-3 right-3 z-20 w-44">
+        <div className="bg-slate-900/85 border border-slate-700/30 rounded-xl p-2 space-y-0.5">
           <h3 className="text-[0.65rem] font-bold text-slate-400 mb-1">{t('game.leaderboard')}</h3>
           {sorted.map((p, i) => {
             const color = PLAYER_COLORS[p.colorIndex] || '#888';
@@ -654,9 +753,9 @@ const GameCanvas = memo(({
       </div>
 
       {/* ── Kill feed ── */}
-      <div className="fixed top-24 left-1/2 -translate-x-1/2 z-20 space-y-1 w-72 pointer-events-none" aria-live="polite" aria-atomic="false">
+      <div className="fixed top-12 left-1/2 -translate-x-1/2 z-20 space-y-1 w-72 pointer-events-none" aria-live="polite" aria-atomic="false">
         {(killFeed || []).map((kf, i) => (
-          <div key={kf.id || i} className="text-center text-xs py-1 px-3 rounded-lg bg-black/50 backdrop-blur-sm text-slate-300 animate-fade-in">
+          <div key={kf.id || i} className="text-center text-xs py-1 px-3 rounded-lg bg-black/70 text-slate-300 animate-fade-in">
             <span className="text-red-400 font-bold">{kf.killer}</span>
             {' '}{t('game.eliminated')}{' '}
             <span className="text-cyan-400 font-bold">{kf.victim}</span>
@@ -673,7 +772,7 @@ const GameCanvas = memo(({
       {!isSpectator && (
         <button onClick={onLeaveGame}
           aria-label={t('game.leaveGame')}
-          className="fixed bottom-4 left-4 z-20 px-3 py-2 rounded-xl bg-red-900/40 hover:bg-red-800/50 border border-red-500/20 text-red-400 text-xs font-medium transition-all backdrop-blur-sm">
+          className="fixed bottom-4 left-4 z-20 px-3 py-2 rounded-xl bg-red-900/80 hover:bg-red-800/70 border border-red-500/20 text-red-400 text-xs font-medium transition-all">
           🚪 {t('game.leaveGame')}
         </button>
       )}

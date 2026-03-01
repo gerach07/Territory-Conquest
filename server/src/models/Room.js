@@ -671,7 +671,7 @@ class Room {
           trailArr[i * 2 + 1] = p.trail[i].y;
         }
       } else {
-        trailArr = [];
+        trailArr = null; // null instead of [] to save bytes in msgpack
       }
       players[pid] = {
         x: p.x, y: p.y, d: p.direction,

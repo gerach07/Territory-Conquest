@@ -11,6 +11,7 @@ import { useI18n } from './i18n/I18nContext';
 import { buildWaitingData, processGameState, formatUptime, getRoomFromURL, setURLRoom } from './utils/gameHelpers';
 import { playSound, setSoundEnabled } from './utils/sounds';
 import { playPhaseMusic } from './utils/music';
+// eslint-disable-next-line no-unused-vars
 import { TICK_MS, GRID_SIZE } from './constants';
 import msgpack from 'msgpack-lite';
 
@@ -122,6 +123,7 @@ function App() {
   const [toast,      setToast]      = useState(null);
   const [serverInfo, setServerInfo] = useState(null);
   const [serverInfoOpen, setServerInfoOpen] = useState(false);
+  const [currentPing, setCurrentPing] = useState(0);
   const serverInfoBtnRef = useRef(null);
 
   const toastTimer  = useRef(null);
@@ -139,6 +141,11 @@ function App() {
   const tickTimeRef    = useRef(0);      // when tick N arrived (aligned to server clock)
   const lastServerSeqRef = useRef(0);
 
+  // Throttle React re-renders: canvas reads from gameStateRef at 60fps,
+  // but setGameState (which triggers React reconciliation) only fires at ~4Hz
+  const lastReactUpdateRef = useRef(0);
+  const gridVersionRef = useRef(0);      // increments on every grid change for canvas dirty detection
+
   // clock sync / ping
   const serverTimeOffsetRef = useRef(0); // ms to add to local perf.now() to match server clock
   const pingRef = useRef(0);            // RTT in ms
@@ -153,12 +160,14 @@ function App() {
     x: 0, y: 0,         // current sim position (integer cells)
     prevX: 0, prevY: 0, // position at previous local tick
     direction: 'right',  // current direction
-    tickTime: 0,        // performance.now() of last local tick
+    tickTime: 0,        // logical tick time (performance.now()-based)
     simTick: 0,         // local simulation tick counter
     visualOffsetX: 0,   // smooth visual correction offset (decays over time)
     visualOffsetY: 0,
     alive: false,
     active: false,
+    _accumulator: 0,    // sub-tick time accumulator (driven by GameCanvas rAF)
+    _lastRAF: 0,        // last rAF timestamp for accumulator delta
   });
   const inputSeqRef = useRef(0);     // monotonic input sequence counter
   const inputBufferRef = useRef([]); // unconfirmed inputs: [{seq, dir}]
@@ -173,6 +182,14 @@ function App() {
     chatOpenRef.current = chatOpen;
     roomPasswordRef.current = roomPassword;
   }, [gameState, roomCode, gameTimeLimit, phase, chatOpen, roomPassword]);
+
+  /* ── Ping state sync (updates from ref every 2s) ── */
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCurrentPing(Math.round(pingRef.current));
+    }, 2000);
+    return () => clearInterval(id);
+  }, []);
 
   /* ── Kill feed cleanup interval (only active during game phase) ── */
   useEffect(() => {
@@ -210,7 +227,7 @@ function App() {
     toastTimer.current = setTimeout(() => setToast(null), duration);
   }, []);
 
-  /* ── Local simulation loop (10Hz, matching server tick rate) ── */
+  /* ── Local simulation init (tick stepping is driven by GameCanvas rAF) ── */
   useEffect(() => {
     const sim = localSimRef.current;
     if (phase !== 'game' || isSpectator) {
@@ -234,30 +251,9 @@ function App() {
       }
     }
     sim.active = true;
-
-    const interval = setInterval(() => {
-      if (!sim.active || !sim.alive) return;
-      // Save previous position for interpolation
-      sim.prevX = sim.x;
-      sim.prevY = sim.y;
-      sim.tickTime = performance.now();
-      sim.simTick++;
-      // Advance 1 cell in current direction (matches server exactly)
-      const dv = DIR_V[sim.direction];
-      if (dv) {
-        const nx = sim.x + dv[0];
-        const ny = sim.y + dv[1];
-        // Match server behavior: boundary = death (don't clamp)
-        if (nx < 0 || nx >= GRID_SIZE || ny < 0 || ny >= GRID_SIZE) {
-          sim.alive = false;
-          return;
-        }
-        sim.x = nx;
-        sim.y = ny;
-      }
-    }, TICK_MS);
-
-    return () => clearInterval(interval);
+    sim._accumulator = 0;
+    sim._lastRAF = performance.now();
+    // No timer — GameCanvas render loop drives tick accumulation for perfect sync
   }, [phase, isSpectator]);
 
   /* ── Server health polling (pauses when tab is hidden) ── */
@@ -508,7 +504,6 @@ function App() {
 
       const prevGs = gameStateRef.current;
       const myId = socketRef.current?.id;
-      const now = performance.now() + serverTimeOffsetRef.current;
 
       // Snapshot previous positions for OTHER players' interpolation
       if (prevGs?.players) {
@@ -516,7 +511,8 @@ function App() {
         prevGs.players.forEach(p => { snap[p.id] = { x: p.x, y: p.y }; });
         prevPlayersRef.current = snap;
       }
-      tickTimeRef.current = now;
+      // Use raw performance.now() — server offset is for clock sync, not frame timing
+      tickTimeRef.current = performance.now();
 
       const gs = processGameState(state, null, prevGs?.grid);
 
@@ -576,7 +572,20 @@ function App() {
               const dv = DIR_V[sim.direction] || [0, 0];
               const forward = dx * dv[0] + dy * dv[1];
               const lateralDist = dist - Math.abs(forward);
-              if (!(lateralDist === 0 && forward > 0 && forward <= 4)) {
+              // Allow up to 5 cells ahead in forward direction with no lateral drift
+              // (normal due to client prediction being ticks ahead of server)
+              if (lateralDist === 0 && forward > 0 && forward <= 5) {
+                // Expected prediction gap — don't correct
+              } else if (dist <= 2) {
+                // Small correction: gentle blend (half visual offset)
+                sim.x = serverMe.x;
+                sim.y = serverMe.y;
+                sim.prevX = sim.x - dv[0];
+                sim.prevY = sim.y - dv[1];
+                sim.visualOffsetX += dx * 0.4;
+                sim.visualOffsetY += dy * 0.4;
+              } else {
+                // Larger correction: full visual offset
                 sim.visualOffsetX += dx;
                 sim.visualOffsetY += dy;
                 sim.x = serverMe.x;
@@ -590,7 +599,20 @@ function App() {
       }
 
       gameStateRef.current = gs;
-      setGameState(gs);
+
+      // Signal grid changes to canvas (always, regardless of React throttle)
+      if (state.gc?.length > 0 || state.gridChanges?.length > 0 || state.fullGrid) {
+        gridVersionRef.current++;
+      }
+
+      // Throttle React state updates to ~4Hz — canvas reads from ref at 60fps.
+      // Forces update on important events (kills, respawns, game-over transitions).
+      const reactNow = performance.now();
+      const hasImportantEvent = state.events?.length > 0;
+      if (hasImportantEvent || reactNow - lastReactUpdateRef.current >= 250) {
+        lastReactUpdateRef.current = reactNow;
+        setGameState(gs);
+      }
 
       if (state.timeRemaining !== undefined) {
         setTimeRemaining(state.timeRemaining);
@@ -732,18 +754,30 @@ function App() {
       if (!data?.grid) return;
       const prevGs = gameStateRef.current;
       if (!prevGs) return;
-      // Rebuild complete grid from server's authoritative flat array
-      const newGrid = [];
       const GRID = 80; // GRID_SIZE
-      for (let y = 0; y < GRID; y++) {
-        newGrid[y] = [];
-        for (let x = 0; x < GRID; x++) {
-          newGrid[y][x] = data.grid[y * GRID + x];
+      if (prevGs.grid) {
+        // Update grid in-place — avoids allocating 80 new arrays
+        for (let y = 0; y < GRID; y++) {
+          for (let x = 0; x < GRID; x++) {
+            prevGs.grid[y][x] = data.grid[y * GRID + x];
+          }
         }
+        // New state reference so canvas detects the change
+        const gs = { ...prevGs };
+        gameStateRef.current = gs;
+        gridVersionRef.current++;
+      } else {
+        const newGrid = [];
+        for (let y = 0; y < GRID; y++) {
+          newGrid[y] = new Array(GRID);
+          for (let x = 0; x < GRID; x++) {
+            newGrid[y][x] = data.grid[y * GRID + x];
+          }
+        }
+        const gs = { ...prevGs, grid: newGrid };
+        gameStateRef.current = gs;
       }
-      const gs = { ...prevGs, grid: newGrid };
-      gameStateRef.current = gs;
-      setGameState(gs);
+      setGameState(gameStateRef.current);
     };
 
     // Request full grid when tab regains visibility (prevents drift when backgrounded)
@@ -935,12 +969,9 @@ function App() {
     // Send to server with sequence number
     socketRef.current?.emit('changeDirection', { direction: dir, seq });
 
-    // Update game state direction locally
-    const updated = [...gs.players];
-    updated[meIdx] = { ...me, direction: dir };
-    const newGs = { ...gs, players: updated };
-    gameStateRef.current = newGs;
-    setGameState(newGs);
+    // Update direction in gameStateRef only (no React re-render for instant responsiveness)
+    me.direction = dir;
+    gameStateRef.current = gs;
 
     // Update local simulation immediately
     const sim = localSimRef.current;
@@ -993,11 +1024,11 @@ function App() {
 
   return (
     <div className={`min-h-screen theme-bg text-white ${lightTheme ? 'light-theme' : ''}`}>
-      <FloatingBubbles />
+      {phase !== 'game' && <FloatingBubbles />}
       <ConnectionOverlay isConnected={isConnected} />
 
-      {/* ── Header ── */}
-      <header className="theme-header bg-slate-900/80 backdrop-blur-xl border-b border-slate-700/60 shadow-lg relative z-20" role="banner">
+      {/* ── Header (hidden during gameplay to avoid expensive backdrop-blur compositing) ── */}
+      <header className={`theme-header bg-slate-900/80 border-b border-slate-700/60 shadow-lg relative z-20 ${phase === 'game' ? 'hidden' : 'backdrop-blur-xl'}`} role="banner">
         <div className="max-w-5xl mx-auto px-3 sm:px-6 py-2 flex items-center justify-between gap-2 relative">
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-xl sm:text-2xl drop-shadow-lg">🏴</span>
@@ -1111,6 +1142,16 @@ function App() {
                     <span className="text-slate-300 font-mono bg-slate-800/50 px-2 py-0.5 rounded-md">{serverInfo.memoryMB}MB</span>
                   </div>
                   )}
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-500">{t('serverInfo.ping')}</span>
+                    <span className={`font-mono bg-slate-800/50 px-2 py-0.5 rounded-md ${
+                      currentPing < 50 ? 'text-emerald-400' : currentPing < 100 ? 'text-yellow-400' : 'text-red-400'
+                    }`}>{currentPing}ms</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-500">{t('serverInfo.tickRate')}</span>
+                    <span className="text-slate-300 font-mono bg-slate-800/50 px-2 py-0.5 rounded-md">10 Hz</span>
+                  </div>
                 </div>
               </div>
             )}
@@ -1160,6 +1201,8 @@ function App() {
         {phase === 'game' && (
           <GameCanvas
             gameState={gameState}
+            appGameStateRef={gameStateRef}
+            gridVersionRef={gridVersionRef}
             myId={myId}
             isSpectator={isSpectator}
             isDead={isDead}
@@ -1173,6 +1216,7 @@ function App() {
             tickTime={tickTimeRef}
             localSim={localSimRef}
             timeOffset={serverTimeOffsetRef}
+            pingRef={pingRef}
           />
         )}
 
@@ -1212,10 +1256,12 @@ function App() {
         </div>
       )}
 
-      {/* ── Footer ── */}
-      <footer className="max-w-5xl mx-auto px-3 sm:px-6 py-2.5 text-center mt-auto relative z-10" role="contentinfo">
-        <p className="text-[0.55rem] text-slate-600">{t('app.footer')}</p>
-      </footer>
+      {/* ── Footer (hidden during gameplay) ── */}
+      {phase !== 'game' && (
+        <footer className="max-w-5xl mx-auto px-3 sm:px-6 py-2.5 text-center mt-auto relative z-10" role="contentinfo">
+          <p className="text-[0.55rem] text-slate-600">{t('app.footer')}</p>
+        </footer>
+      )}
     </div>
   );
 }

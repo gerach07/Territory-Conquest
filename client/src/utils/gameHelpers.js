@@ -139,30 +139,34 @@ export function processGameState(state, flatGrid, prevGrid) {
     }
   }
 
-  // If server sent a periodic full grid sync, rebuild grid from it
+  // If server sent a periodic full grid sync, update in-place if possible
   // (overrides incremental gridChanges to correct any drift)
   if (state.fullGrid && Array.isArray(state.fullGrid)) {
-    result.grid = [];
-    for (let y = 0; y < GRID_SIZE; y++) {
-      result.grid[y] = [];
-      for (let x = 0; x < GRID_SIZE; x++) {
-        result.grid[y][x] = state.fullGrid[y * GRID_SIZE + x];
+    if (result.grid) {
+      // Update existing grid in-place — avoids allocating 80 new arrays
+      for (let y = 0; y < GRID_SIZE; y++) {
+        for (let x = 0; x < GRID_SIZE; x++) {
+          result.grid[y][x] = state.fullGrid[y * GRID_SIZE + x];
+        }
+      }
+    } else {
+      result.grid = [];
+      for (let y = 0; y < GRID_SIZE; y++) {
+        result.grid[y] = new Array(GRID_SIZE);
+        for (let x = 0; x < GRID_SIZE; x++) {
+          result.grid[y][x] = state.fullGrid[y * GRID_SIZE + x];
+        }
       }
     }
   } else if (result.grid) {
-    // Apply incremental grid changes — compact format (flat [x,y,owner,...]) or legacy objects
+    // Apply incremental grid changes in-place (no row cloning — reduces GC pressure)
     const gc = state.gc; // compact: [x, y, owner, x, y, owner, ...]
     const gridChanges = state.gridChanges; // legacy: [{x, y, owner, type}, ...]
-    const clonedRows = new Set();
 
     if (gc && gc.length > 0) {
       for (let i = 0; i < gc.length; i += 3) {
         const x = gc[i], y = gc[i + 1], owner = gc[i + 2];
         if (y >= 0 && y < GRID_SIZE && x >= 0 && x < GRID_SIZE) {
-          if (!clonedRows.has(y)) {
-            result.grid[y] = [...result.grid[y]];
-            clonedRows.add(y);
-          }
           result.grid[y][x] = owner;
         }
       }
@@ -170,10 +174,6 @@ export function processGameState(state, flatGrid, prevGrid) {
       for (let i = 0; i < gridChanges.length; i++) {
         const change = gridChanges[i];
         if (change.y >= 0 && change.y < GRID_SIZE && change.x >= 0 && change.x < GRID_SIZE) {
-          if (!clonedRows.has(change.y)) {
-            result.grid[change.y] = [...result.grid[change.y]];
-            clonedRows.add(change.y);
-          }
           result.grid[change.y][change.x] = change.owner;
         }
       }
