@@ -5,6 +5,7 @@
  * ============================================================================
  */
 
+const crypto = require('crypto');
 const {
   GRID_SIZE, MAX_PLAYERS_PER_ROOM, MAX_SPECTATORS,
   RESPAWN_DELAY_MS, RECONNECT_GRACE_MS, START_TERRITORY_SIZE,
@@ -180,7 +181,14 @@ class Room {
   playerCount() { return Object.keys(this.players).length; }
   isFull() { return this.playerCount() >= MAX_PLAYERS_PER_ROOM; }
   hasPassword() { return this.password !== null && this.password !== ''; }
-  checkPassword(pwd) { return !this.hasPassword() || this.password === pwd; }
+  checkPassword(pwd) {
+    if (!this.hasPassword()) return true;
+    if (typeof pwd !== 'string') return false;
+    const a = Buffer.from(this.password);
+    const b = Buffer.from(pwd);
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  }
   isHost(pid) { return this.hostId === pid; }
 
   getPlayerList() {
@@ -272,6 +280,8 @@ class Room {
     this.cellCounts = {};
     // Per-player owned cell coordinates for O(owned) territory clearing
     this.ownedCells = {};
+    // Position map for O(1) collision detection: "x,y" -> playerId
+    this.positionMap = new Map();
 
     this.playerOrder = Object.keys(this.players);
     this.playerOrder.forEach((pid, idx) => {
@@ -286,6 +296,7 @@ class Room {
 
       this.cellCounts[p.playerIndex] = 0;
       this.ownedCells[p.playerIndex] = new Set();
+      this.positionMap.set(`${p.x},${p.y}`, pid);
 
       const half = Math.floor(START_TERRITORY_SIZE / 2);
       for (let dy = -half; dy <= half; dy++) {
@@ -393,6 +404,7 @@ class Room {
     this._transitionState(GameState.WAITING);
     this.grid = null;
     this.trailGrid = null;
+    this.positionMap = null;
     this.gameStartTime = null;
     this.gameEndTime = null;
     this.winnerId = null;
@@ -517,24 +529,28 @@ class Room {
         }
       }
 
-      for (const otherId of this.playerOrder) {
-        if (otherId === pid) continue;
-        const other = this.players[otherId];
-        if (!other || !other.alive) continue;
-        if (other.x === newX && other.y === newY) {
+      // O(1) collision detection using positionMap
+      const posKey = `${newX},${newY}`;
+      const occupantId = this.positionMap.get(posKey);
+      if (occupantId && occupantId !== pid) {
+        const other = this.players[occupantId];
+        if (other && other.alive) {
           if (p.trail.length > 0) {
-            this.killPlayer(pid, 'collision', otherId, gridChanges);
-            events.push({ type: 'kill', victim: pid, killer: otherId, reason: 'collision' });
+            this.killPlayer(pid, 'collision', occupantId, gridChanges);
+            events.push({ type: 'kill', victim: pid, killer: occupantId, reason: 'collision' });
           }
           if (other.trail.length > 0) {
-            this.killPlayer(otherId, 'collision', pid, gridChanges);
-            events.push({ type: 'kill', victim: otherId, killer: pid, reason: 'collision' });
+            this.killPlayer(occupantId, 'collision', pid, gridChanges);
+            events.push({ type: 'kill', victim: occupantId, killer: pid, reason: 'collision' });
           }
         }
       }
       if (!p.alive) continue;
 
+      // Update positionMap: remove old position, set new
+      this.positionMap.delete(`${p.x},${p.y}`);
       p.x = newX; p.y = newY;
+      this.positionMap.set(posKey, pid);
       const cellOwner = this.grid[newY][newX];
 
       if (cellOwner === p.playerIndex && p.trail.length > 0) {
@@ -560,6 +576,8 @@ class Room {
     const p = this.players[pid];
     if (!p || !p.alive) return;
     p.alive = false; p.deathTime = Date.now();
+    // Remove from position map
+    if (this.positionMap) this.positionMap.delete(`${p.x},${p.y}`);
     for (const pos of p.trail) {
       this.trailGrid[pos.y][pos.x] = 0;
       this.trailTS[pos.y][pos.x] = 0;
@@ -620,6 +638,8 @@ class Room {
 
     p.x = bestX; p.y = bestY; p.direction = 'right';
     p.trail = []; p.alive = true; p.deathTime = 0;
+    // Update position map
+    if (this.positionMap) this.positionMap.set(`${bestX},${bestY}`, pid);
 
     const half = Math.floor(START_TERRITORY_SIZE / 2);
     for (let dy = -half; dy <= half; dy++) {
@@ -733,6 +753,11 @@ class Room {
 
   cleanup() {
     if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null; }
+    this.positionMap = null;
+    this.grid = null;
+    this.trailGrid = null;
+    this.ownedCells = null;
+    this.cellCounts = null;
   }
 }
 

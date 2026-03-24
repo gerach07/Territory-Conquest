@@ -3,7 +3,7 @@
    Main entry – all state, socket handlers, phase rendering
    (mirrors Battleships client/src/App.js)
    ═══════════════════════════════════════════════════════════ */
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
 import './App.css';
 import useSocket from './hooks/useSocket';
@@ -15,12 +15,15 @@ import { playPhaseMusic } from './utils/music';
 import { TICK_MS, GRID_SIZE } from './constants';
 import msgpack from 'msgpack-lite';
 
+// Eagerly loaded — on the critical render path
 import LoginView        from './components/LoginView';
 import WaitingRoom      from './components/WaitingRoom';
-import GameCanvas       from './components/GameCanvas';
-import GameOver         from './components/GameOver';
-import ChatBox          from './components/ChatBox';
 import ConnectionOverlay from './components/ConnectionOverlay';
+
+// Lazy loaded — not needed until later game phases
+const GameCanvas = lazy(() => import('./components/GameCanvas'));
+const GameOver   = lazy(() => import('./components/GameOver'));
+const ChatBox    = lazy(() => import('./components/ChatBox'));
 
 // Direction vectors for local simulation
 const DIR_V = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
@@ -195,9 +198,12 @@ function App() {
   useEffect(() => {
     if (phase !== 'game') return;
     const killFeedCleanup = setInterval(() => {
-      const now = Date.now();
-      setKillFeed(prev => prev.filter(kf => now - kf.timestamp < 5000));
-    }, 1000);
+      const cutoff = Date.now() - 5000;
+      setKillFeed(prev => {
+        const filtered = prev.filter(kf => kf.timestamp > cutoff);
+        return filtered.length === prev.length ? prev : filtered;
+      });
+    }, 500);
     return () => clearInterval(killFeedCleanup);
   }, [phase]);
 
@@ -360,6 +366,7 @@ function App() {
     };
 
     const onTimeSyncResp = ({ clientTime, serverTime }) => {
+      if (typeof clientTime !== 'number' || typeof serverTime !== 'number') return;
       const now = performance.now();
       const rtt = now - clientTime;
       const offset = serverTime + rtt / 2 - now;
@@ -715,7 +722,7 @@ function App() {
     const onChatMessage = (msg) => {
       setChatMessages(prev => {
         const updated = [...prev, msg];
-        return updated.slice(-100);
+        return updated.length > 100 ? updated.slice(-100) : updated;
       });
       if (!chatOpenRef.current) setChatUnread(prev => prev + 1);
       playSound('chat');
@@ -955,9 +962,12 @@ function App() {
     const me = gs.players[meIdx];
     if (!me.alive) return;
 
+    const sim = localSimRef.current;
+    // Use local sim direction (not server's potentially stale value) for validation
+    const currentDir = sim.active ? sim.direction : me.direction;
     const opposites = { up: 'down', down: 'up', left: 'right', right: 'left' };
-    if (opposites[me.direction] === dir) return; // server would reject this
-    if (me.direction === dir) return; // already heading that way
+    if (opposites[currentDir] === dir) return; // server would reject this
+    if (currentDir === dir) return; // already heading that way
 
     // Assign sequence number and track in input buffer (keep only last 20)
     const seq = ++inputSeqRef.current;
@@ -973,9 +983,25 @@ function App() {
     me.direction = dir;
     gameStateRef.current = gs;
 
-    // Update local simulation immediately
-    const sim = localSimRef.current;
+    // Update local simulation and immediately step one tick in the new direction.
+    // Without this, the visual turn waits for the next accumulator tick (up to 100ms).
+    // This gives sub-frame (~16ms) response to direction changes.
     sim.direction = dir;
+    if (sim.active && sim.alive) {
+      sim.prevX = sim.x;
+      sim.prevY = sim.y;
+      const dv = DIR_V[dir] || [0, 0];
+      const nx = sim.x + dv[0];
+      const ny = sim.y + dv[1];
+      if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE) {
+        sim.x = nx;
+        sim.y = ny;
+      }
+      // Reset accumulator so interpolation starts fresh from this instant
+      sim._accumulator = 0;
+      sim.tickTime = performance.now();
+      sim.simTick++;
+    }
   }, []);
 
   const handleLeaveGame = useCallback(() => {
@@ -1199,6 +1225,7 @@ function App() {
 
         {/* GAME */}
         {phase === 'game' && (
+          <Suspense fallback={<div className="flex items-center justify-center h-screen text-white">Loading...</div>}>
           <GameCanvas
             gameState={gameState}
             appGameStateRef={gameStateRef}
@@ -1218,10 +1245,12 @@ function App() {
             timeOffset={serverTimeOffsetRef}
             pingRef={pingRef}
           />
+          </Suspense>
         )}
 
         {/* GAME OVER */}
         {phase === 'gameOver' && (
+          <Suspense fallback={<div className="flex items-center justify-center h-screen text-white">Loading...</div>}>
           <GameOver
             gameOverData={gameOverData}
             myId={myId}
@@ -1232,11 +1261,13 @@ function App() {
             handleDeclinePlayAgain={handleDeclinePlayAgain}
             handleBackToMenu={handleBackToMenu}
           />
+          </Suspense>
         )}
       </main>
 
       {/* ── Chat ── */}
       {showChat && (
+        <Suspense fallback={null}>
         <ChatBox
           messages={chatMessages}
           onSend={handleSendChat}
@@ -1245,6 +1276,7 @@ function App() {
           unread={chatUnread}
           myId={myId}
         />
+        </Suspense>
       )}
 
       {/* ── Toast ── */}

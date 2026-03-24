@@ -44,7 +44,8 @@ const LoginView = memo(({
       const avail = PLAYER_COLORS.findIndex((_, i) => !takenColors.includes(i));
       if (avail >= 0) setSelectedColor(avail);
     }
-  }, [takenColors, selectedColor, pendingJoin]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [takenColors, pendingJoin]);
 
   /* ── fetch rooms list ── */
   const fetchRooms = useCallback(async () => {

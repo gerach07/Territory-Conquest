@@ -68,7 +68,19 @@ app.use(compression({
     return compression.filter(req, res);
   },
 }));
-app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+      connectSrc: ["'self'", 'wss:', 'ws:', ...ALLOWED_ORIGINS],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+}));
 app.use(cors({ origin: isOriginAllowed, methods: ['GET', 'POST'], credentials: true }));
 app.use(express.json({ limit: '16kb' }));
 
@@ -76,7 +88,7 @@ const server = http.createServer(app);
 const io = socketIo(server, {
   cors: { origin: isOriginAllowed, methods: ['GET', 'POST'], credentials: true },
   pingTimeout: 60000, pingInterval: 25000,
-  maxHttpBufferSize: 1e6,
+  maxHttpBufferSize: 64e3,
   transports: ['websocket'],   // WebSocket only — no polling
   allowUpgrades: false,
   perMessageDeflate: false,    // Disable per-message compression (adds CPU latency)
@@ -89,6 +101,7 @@ const io = socketIo(server, {
 const rooms = {};
 const playerToRoom = {};
 const disconnectedPlayers = new Map(); // key: `${roomId}:${playerName}`, value: { socketId, playerData, roomId, timestamp, password }
+const MAX_DISCONNECTED_PLAYERS = 5000;
 const ipRateLimiter = new RateLimiter(IP_RATE_LIMIT_MAX, 60000);
 const pinTracker = new Map();
 const PIN_RATE_WINDOW = 60000;
@@ -170,6 +183,7 @@ function startGameLoop(roomId) {
       const buf = msgpack.encode(state);
       io.to(roomId).emit('gameState', buf);
     } catch (err) {
+      console.error(`msgpack encode error in room ${roomId}:`, err.message);
       // fallback to JSON if msgpack fails for whatever reason
       io.to(roomId).emit('gameState', state);
     }
@@ -221,6 +235,12 @@ function handlePlayerLeave(socketId) {
   // During PLAYING state, store player for reconnection instead of killing immediately
   if (room.state === GameState.PLAYING && player && player.alive) {
     const reconnectKey = `${roomId}:${playerName}`;
+    // Enforce upper bound on disconnectedPlayers Map
+    if (disconnectedPlayers.size >= MAX_DISCONNECTED_PLAYERS) {
+      // Remove oldest entry
+      const oldestKey = disconnectedPlayers.keys().next().value;
+      disconnectedPlayers.delete(oldestKey);
+    }
     disconnectedPlayers.set(reconnectKey, {
       oldSocketId: socketId,
       playerData: { ...player }, // shallow copy
@@ -337,7 +357,7 @@ io.on('connection', (socket) => {
 
   // ── JOIN ──
   socket.on('joinGame', async (payload) => {
-    if (!payload || typeof payload !== 'object') return socket.emit('error', { error: 'Invalid request' });
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return socket.emit('error', { error: 'Invalid request' });
     const { gameId, playerName, password, colorIndex, isCreating, isSpectating, timeLimit } = payload;
     if (playerToRoom[socket.id]) handlePlayerLeave(socket.id);
 
@@ -417,7 +437,7 @@ io.on('connection', (socket) => {
 
   // ── DIRECTION ──
   socket.on('changeDirection', (payload) => {
-    if (!payload || typeof payload !== 'object') return;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
     const { direction } = payload;
     if (!DIRECTIONS[direction]) return;
     const roomId = playerToRoom[socket.id];
@@ -430,7 +450,7 @@ io.on('connection', (socket) => {
     if (opposites[player.direction] === direction) return;
     player.direction = direction;
     // Track last confirmed input sequence for client-side prediction reconciliation
-    if (typeof payload.seq === 'number') {
+    if (typeof payload.seq === 'number' && payload.seq > (player.lastInputSeq || 0)) {
       player.lastInputSeq = payload.seq;
     }
   });
@@ -771,8 +791,8 @@ app.post('/rooms/:id/check-password', (req, res) => {
   const key = `${clientIp}:${req.params.id.toUpperCase()}`;
   const now = Date.now();
 
-  // Unbounded-growth protection
-  if (pinTracker.size > 10000) {
+  // Unbounded-growth protection — cap at 5000 entries
+  if (pinTracker.size > 5000) {
     for (const [k, e] of pinTracker) {
       e.ts = e.ts.filter(t => now - t < PIN_RATE_WINDOW);
       if (e.ts.length === 0) pinTracker.delete(k);
