@@ -611,7 +611,7 @@ const GameCanvas = memo(({
       if (gs.players) {
         const myCurrentId = myIdRef.current;
         gs.players.forEach(p => {
-          if (!p.alive) return;
+          if (!p || !p.alive) return;
           const color = PLAYER_COLORS[p.colorIndex] || '#ffffff';
           const isSelf = p.id === myCurrentId;
           // Use predicted position for local player, normal interpolation for others
@@ -664,7 +664,7 @@ const GameCanvas = memo(({
       // Draw player positions on top
       if (gs.players) {
         gs.players.forEach(p => {
-          if (!p.alive) return;
+          if (!p || !p.alive) return;
           const isSelf = p.id === myIdRef.current;
           const { ix, iy } = (isSelf && meInterp) ? meInterp : getInterpPos(p, prev, t_lerp);
           ctx.fillStyle = isSelf ? '#ffffff' : (PLAYER_COLORS[p.colorIndex] || '#ffffff');

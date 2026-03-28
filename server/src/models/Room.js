@@ -184,9 +184,9 @@ class Room {
   checkPassword(pwd) {
     if (!this.hasPassword()) return true;
     if (typeof pwd !== 'string') return false;
-    const a = Buffer.from(this.password);
-    const b = Buffer.from(pwd);
-    if (a.length !== b.length) return false;
+    // Constant-time comparison: hash both to fixed length to avoid leaking password length
+    const a = crypto.createHash('sha256').update(this.password).digest();
+    const b = crypto.createHash('sha256').update(pwd).digest();
     return crypto.timingSafeEqual(a, b);
   }
   isHost(pid) { return this.hostId === pid; }
@@ -630,7 +630,10 @@ class Room {
       for (let dy = -half; dy <= half && !onClaimed; dy++) {
         for (let dx = -half; dx <= half && !onClaimed; dx++) {
           const gx = cx + dx, gy = cy + dy;
-          if (gx >= 0 && gx < GRID_SIZE && gy >= 0 && gy < GRID_SIZE && this.grid[gy][gx] !== 0) onClaimed = true;
+          if (gx >= 0 && gx < GRID_SIZE && gy >= 0 && gy < GRID_SIZE) {
+            if (this.grid[gy][gx] !== 0) onClaimed = true;
+            if (this.trailGrid && this.trailGrid[gy][gx] !== 0) onClaimed = true;
+          }
         }
       }
       if (!onClaimed && minDist > bestDist) { bestDist = minDist; bestX = cx; bestY = cy; }

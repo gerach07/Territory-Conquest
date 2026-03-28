@@ -51,6 +51,7 @@ export function playPhaseMusic(phase) {
   audio.loop = track.loop;
   audio.volume = 0;
   audio.preload = 'auto';
+  audio.addEventListener('error', () => { console.warn('[Music] Failed to load:', track.src); });
   audio.play().then(() => {
     const rampStep = 30;
     const rampDuration = 600;
