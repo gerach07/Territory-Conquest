@@ -16,7 +16,7 @@ export const PLAYER_COLORS = [
 export const COLOR_NAMES = ['Red', 'Blue', 'Green', 'Yellow', 'Purple', 'Orange', 'Pink', 'Cyan'];
 
 export const LOCAL_SERVER_URL  = 'http://localhost:3001';
-export const PUBLIC_SERVER_URL = 'https://territory-conquest-server.onrender.com';
+export const PUBLIC_SERVER_URL = 'https://territory-conquest.onrender.com';
 
 // If REACT_APP_SERVER_URL is explicitly set at build time, use only that.
 // Otherwise the app will try LOCAL first, then fall back to PUBLIC at runtime (see useSocket.js).
