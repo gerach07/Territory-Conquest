@@ -55,7 +55,7 @@ const useSocket = () => {
       return () => { cancelled = true; s.disconnect(); };
     }
 
-    // 2) Remote host — go straight to public Railway server (no localhost probe)
+    // 2) Remote host — go straight to public Render server (no localhost probe)
     if (!isLocalhost) {
       const s = connectDirect(PUBLIC_SERVER_URL);
       return () => { cancelled = true; s.disconnect(); };

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "NODE_ENV=production node server.js",
+    "build": "echo 'No build step required'",
     "dev": "NODE_ENV=development nodemon server.js",
     "test": "NODE_ENV=test node test-validation.js"
   },

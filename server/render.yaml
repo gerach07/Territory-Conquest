@@ -6,8 +6,11 @@ services:
     region: oregon
     plan: starter
     healthCheckPath: /health
+    numInstances: 1
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: "10000"
       - key: ALLOWED_ORIGINS
         value: http://localhost:3000,http://localhost:3001,http://localhost:5000,https://absnakeab.web.app,https://absnakeab.firebaseapp.com

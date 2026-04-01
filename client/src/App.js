@@ -498,9 +498,14 @@ function App() {
 
     const onGameState = (data) => {
       // gameState may arrive as binary (msgpack) or JSON; decode
-      const state = (data instanceof ArrayBuffer || data instanceof Uint8Array)
-        ? msgpack.decode(new Uint8Array(data))
-        : data;
+      let state;
+      try {
+        state = (data instanceof ArrayBuffer || data instanceof Uint8Array)
+          ? msgpack.decode(new Uint8Array(data))
+          : data;
+      } catch {
+        return; // corrupted packet — skip
+      }
       const seq = Number.isFinite(state?.seq) ? state.seq : null;
       if (seq !== null && seq <= lastServerSeqRef.current) {
         return;
