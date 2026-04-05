@@ -171,6 +171,7 @@ function App() {
     active: false,
     _accumulator: 0,    // sub-tick time accumulator (driven by GameCanvas rAF)
     _lastRAF: 0,        // last rAF timestamp for accumulator delta
+    predictedTrail: [], // [[x,y], ...] — client-predicted trail cells (ahead of server)
   });
   const inputSeqRef = useRef(0);     // monotonic input sequence counter
   const inputBufferRef = useRef([]); // unconfirmed inputs: [{seq, dir}]
@@ -259,6 +260,7 @@ function App() {
     sim.active = true;
     sim._accumulator = 0;
     sim._lastRAF = performance.now();
+    sim.predictedTrail = [];
     // No timer — GameCanvas render loop drives tick accumulation for perfect sync
   }, [phase, isSpectator]);
 
@@ -485,6 +487,7 @@ function App() {
           sim.simTick = 0;
           sim.visualOffsetX = 0;
           sim.visualOffsetY = 0;
+          sim.predictedTrail = [];
           sim.active = true;
         }
       }
@@ -544,6 +547,7 @@ function App() {
 
           if (!serverMe.alive) {
             sim.alive = false;
+            sim.predictedTrail = [];
           } else if (!sim.alive) {
             // respawn correction
             sim.alive = true;
@@ -551,6 +555,7 @@ function App() {
             sim.prevX = serverMe.x; sim.prevY = serverMe.y;
             sim.direction = serverMe.direction;
             sim.visualOffsetX = 0; sim.visualOffsetY = 0;
+            sim.predictedTrail = [];
             inputBufferRef.current = [];
           } else {
             const dx = sim.x - serverMe.x;
@@ -563,6 +568,7 @@ function App() {
               sim.prevX = serverMe.x; sim.prevY = serverMe.y;
               sim.direction = serverMe.direction;
               sim.visualOffsetX = 0; sim.visualOffsetY = 0;
+              sim.predictedTrail = [];
               inputBufferRef.current = [];
             } else if (inputBufferRef.current.length > 0) {
               // replay buffer: rewind to authoritative state and apply pending inputs
@@ -573,11 +579,28 @@ function App() {
               sim.direction = serverMe.direction;
               sim.visualOffsetX = 0;
               sim.visualOffsetY = 0;
+              // Rebuild predicted trail by replaying pending inputs with grid checking
+              const replayTrail = [];
+              let rx = serverMe.x, ry = serverMe.y;
+              const grid = gs.grid;
+              const myPI = serverMe.playerIndex;
               for (const inp of inputBufferRef.current) {
                 const dv = DIR_V[inp.dir] || [0, 0];
-                sim.x += dv[0];
-                sim.y += dv[1];
+                rx += dv[0];
+                ry += dv[1];
+                // Track trail prediction during replay
+                if (grid && rx >= 0 && rx < GRID_SIZE && ry >= 0 && ry < GRID_SIZE) {
+                  const cellOwner = grid[ry]?.[rx];
+                  if (cellOwner === myPI && replayTrail.length > 0) {
+                    replayTrail.length = 0; // predicted capture
+                  } else if (cellOwner !== myPI) {
+                    replayTrail.push([rx, ry]);
+                  }
+                }
               }
+              sim.x = rx;
+              sim.y = ry;
+              sim.predictedTrail = replayTrail;
             } else if (dist > 0) {
               // no pending inputs but still a discrepancy – smooth adjust
               sim.direction = serverMe.direction;
@@ -606,6 +629,21 @@ function App() {
                 sim.prevY = sim.y - dv[1];
               }
             }
+          }
+
+          // Prune predicted trail: remove cells already confirmed by server trail
+          if (sim.predictedTrail.length > 0 && serverMe.trail?.length > 0) {
+            const serverTrailSet = new Set();
+            for (const t of serverMe.trail) {
+              serverTrailSet.add(t[0] * GRID_SIZE + t[1]);
+            }
+            sim.predictedTrail = sim.predictedTrail.filter(
+              ([px, py]) => !serverTrailSet.has(px * GRID_SIZE + py)
+            );
+          }
+          // If server reports empty trail, client capture already happened
+          if (serverMe.trail?.length === 0) {
+            sim.predictedTrail = [];
           }
         }
       }
@@ -1001,6 +1039,18 @@ function App() {
       if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE) {
         sim.x = nx;
         sim.y = ny;
+        // Predict trail: check grid to determine if we're leaving own territory
+        const grid = gameStateRef.current?.grid;
+        if (grid) {
+          const myPI = me.playerIndex;
+          const cellOwner = grid[ny]?.[nx];
+          if (cellOwner === myPI && sim.predictedTrail.length > 0) {
+            // Returning to own territory → predicted capture, clear trail
+            sim.predictedTrail = [];
+          } else if (cellOwner !== myPI) {
+            sim.predictedTrail.push([nx, ny]);
+          }
+        }
       }
       // Reset accumulator so interpolation starts fresh from this instant
       sim._accumulator = 0;

@@ -449,6 +449,15 @@ const GameCanvas = memo(({
             }
             sim.x = nx;
             sim.y = ny;
+            // Predict trail: check grid at new position
+            if (gs.grid && me.playerIndex !== undefined) {
+              const cellOwner = gs.grid[ny]?.[nx];
+              if (cellOwner === me.playerIndex && sim.predictedTrail.length > 0) {
+                sim.predictedTrail = []; // returning to own territory → predicted capture
+              } else if (cellOwner !== me.playerIndex) {
+                sim.predictedTrail.push([nx, ny]);
+              }
+            }
           }
         }
 
@@ -592,6 +601,7 @@ const GameCanvas = memo(({
 
       // Trails
       if (gs.players) {
+        const myCurrentId = myIdRef.current;
         gs.players.forEach(p => {
           if (p.trail?.length > 0) {
             ctx.fillStyle = PLAYER_COLORS_ALPHA80[p.colorIndex] || 'rgba(255,255,255,0.5)';
@@ -603,6 +613,21 @@ const GameCanvas = memo(({
               if (tx === p.x && ty === p.y) return;
               ctx.fillRect(tx * cellSize + ox + 1, ty * cellSize + oy + 1, cellSize - 2, cellSize - 2);
             });
+          }
+          // Render client-predicted trail for local player (ahead of server confirmation)
+          if (p.id === myCurrentId && sim?.predictedTrail?.length > 0) {
+            // Build set of server-confirmed trail cells to avoid double-rendering
+            const serverSet = new Set();
+            if (p.trail) {
+              for (const [tx, ty] of p.trail) serverSet.add(tx * GRID_SIZE + ty);
+            }
+            ctx.fillStyle = PLAYER_COLORS_ALPHA80[p.colorIndex] || 'rgba(255,255,255,0.5)';
+            for (const [px, py] of sim.predictedTrail) {
+              if (serverSet.has(px * GRID_SIZE + py)) continue; // already rendered
+              // Skip cell at predicted head position (drawn in Players pass)
+              if (meInterp && Math.round(meInterp.ix) === px && Math.round(meInterp.iy) === py) continue;
+              ctx.fillRect(px * cellSize + ox + 1, py * cellSize + oy + 1, cellSize - 2, cellSize - 2);
+            }
           }
         });
       }
