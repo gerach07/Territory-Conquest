@@ -102,6 +102,7 @@ const rooms = {};
 const playerToRoom = {};
 const disconnectedPlayers = new Map(); // key: `${roomId}:${playerName}`, value: { socketId, playerData, roomId, timestamp, password }
 const MAX_DISCONNECTED_PLAYERS = 5000;
+const MAX_ROOMS = 500;
 const ipRateLimiter = new RateLimiter(IP_RATE_LIMIT_MAX, 60000);
 const pinTracker = new Map();
 const PIN_RATE_WINDOW = 60000;
@@ -205,7 +206,7 @@ function startGameLoop(roomId) {
 
 function transferHost(room, roomId) {
   const remaining = Object.keys(room.players).find(id => !room.players[id]?.disconnected) || Object.keys(room.players)[0];
-  if (remaining) {
+  if (remaining && room.players[remaining]) {
     room.hostId = remaining;
     room.hostName = room.players[remaining].name;
     io.to(roomId).emit('hostChanged', { hostId: room.hostId, hostName: room.hostName });
@@ -237,9 +238,12 @@ function handlePlayerLeave(socketId) {
     const reconnectKey = `${roomId}:${playerName}`;
     // Enforce upper bound on disconnectedPlayers Map
     if (disconnectedPlayers.size >= MAX_DISCONNECTED_PLAYERS) {
-      // Remove oldest entry
-      const oldestKey = disconnectedPlayers.keys().next().value;
-      disconnectedPlayers.delete(oldestKey);
+      // Remove entry with oldest timestamp
+      let oldestKey = null, oldestTs = Infinity;
+      for (const [k, e] of disconnectedPlayers) {
+        if (e.timestamp < oldestTs) { oldestTs = e.timestamp; oldestKey = k; }
+      }
+      if (oldestKey) disconnectedPlayers.delete(oldestKey);
     }
     disconnectedPlayers.set(reconnectKey, {
       oldSocketId: socketId,
@@ -398,6 +402,7 @@ io.on('connection', (socket) => {
 
     if (isCreating) {
       if (room) return socket.emit('error', { error: 'Room already exists. Try a different code.' });
+      if (Object.keys(rooms).length >= MAX_ROOMS) return socket.emit('error', { error: 'Server is full. Please try again later.' });
       room = new Room(roomId, pwd, name, socket.id);
       // Apply time limit if provided (0 = no limit)
       if (typeof timeLimit === 'number' && Number.isFinite(timeLimit) && timeLimit >= 0) {
@@ -803,6 +808,7 @@ app.post('/rooms/:id/check-password', (req, res) => {
   pinTracker.set(key, entry);
   entry.ts = entry.ts.filter(t => now - t < PIN_RATE_WINDOW);
   if (entry.ts.length >= PIN_RATE_MAX) return res.status(429).json({ error: 'Too many attempts' });
+  if (entry.ts.length > 20) entry.ts = entry.ts.slice(-10); // Cap array growth
   entry.ts.push(now);
   const room = rooms[req.params.id.toUpperCase()];
   if (!room) return res.status(404).json({ error: 'Room not found' });

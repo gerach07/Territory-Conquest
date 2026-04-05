@@ -422,7 +422,8 @@ function App() {
       setIsSpectator(true);
       setAllowSpectators(data.allowSpectators !== false);
       if (data.chatHistory) {
-        setChatMessages(data.chatHistory);
+        const history = Array.isArray(data.chatHistory) ? data.chatHistory.slice(-100) : [];
+        setChatMessages(history);
       }
       if (data.state === 'playing' && data.gameState) {
         const gs = processGameState(data.gameState, data.grid, null);

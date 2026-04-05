@@ -40,7 +40,7 @@ function captureTerritory(grid, playerId, trail, cellCounts, ownedCells) {
 
   // Compute bounding box from owned cells set (O(owned) instead of O(GRID_SIZE^2))
   let minX = GRID_SIZE, maxX = 0, minY = GRID_SIZE, maxY = 0;
-  if (ownedCells && ownedCells[playerId]) {
+  if (ownedCells && ownedCells[playerId] && ownedCells[playerId].size > 0) {
     for (const key of ownedCells[playerId]) {
       const y = (key / GRID_SIZE) | 0;
       const x = key % GRID_SIZE;
@@ -220,6 +220,9 @@ class Room {
       joinedAt: Date.now(),
       ping: 0,              // latency estimate (ms)
     };
+    if (!this.playerOrder.includes(playerId)) {
+      this.playerOrder.push(playerId);
+    }
     return true;
   }
 
@@ -461,8 +464,11 @@ class Room {
 
     const events = [], gridChanges = [];
     const now = Date.now();
+    // Snapshot playerOrder so mutations during iteration don't cause issues
+    const orderSnapshot = this.playerOrder.slice();
+    const removedPids = [];
 
-    for (const pid of this.playerOrder) {
+    for (const pid of orderSnapshot) {
       const p = this.players[pid];
       if (!p) continue;
       if (p.forfeited) continue;
@@ -472,9 +478,9 @@ class Room {
         p.disconnected = false;
         this.killPlayer(pid, 'disconnect_timeout', null, gridChanges);
         events.push({ type: 'kill', victim: pid, reason: 'disconnect_timeout' });
-        // Fully remove the disconnected player from the room
+        // Mark for removal after loop
         delete this.players[pid];
-        this.playerOrder = this.playerOrder.filter(id => id !== pid);
+        removedPids.push(pid);
         continue;
       }
 
@@ -568,6 +574,11 @@ class Room {
       }
     }
 
+    // Apply deferred playerOrder removals
+    if (removedPids.length > 0) {
+      this.playerOrder = this.playerOrder.filter(id => !removedPids.includes(id));
+    }
+
     this.updateScores();
     return { events, gridChanges, gameFinished: false };
   }
@@ -613,6 +624,7 @@ class Room {
     let bestX = Math.floor(Math.random() * (GRID_SIZE - 10)) + 5;
     let bestY = Math.floor(Math.random() * (GRID_SIZE - 10)) + 5;
     let bestDist = 0;
+    const half = Math.floor(START_TERRITORY_SIZE / 2);
 
     for (let attempt = 0; attempt < 20; attempt++) {
       const cx = Math.floor(Math.random() * (GRID_SIZE - 10)) + 5;
@@ -626,7 +638,6 @@ class Room {
         if (dist < minDist) minDist = dist;
       }
       let onClaimed = false;
-      const half = Math.floor(START_TERRITORY_SIZE / 2);
       for (let dy = -half; dy <= half && !onClaimed; dy++) {
         for (let dx = -half; dx <= half && !onClaimed; dx++) {
           const gx = cx + dx, gy = cy + dy;
@@ -644,7 +655,6 @@ class Room {
     // Update position map
     if (this.positionMap) this.positionMap.set(`${bestX},${bestY}`, pid);
 
-    const half = Math.floor(START_TERRITORY_SIZE / 2);
     for (let dy = -half; dy <= half; dy++) {
       for (let dx = -half; dx <= half; dx++) {
         const gx = p.x + dx, gy = p.y + dy;
